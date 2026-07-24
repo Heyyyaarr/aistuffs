@@ -35,7 +35,8 @@ All agents communicate through Ollama (`qwen2.5:14b`) for LLM reasoning.
 ├── agents/                      # AI prompt files loaded at runtime
 │   ├── agent1_siem.md           #   Agent 1 system prompt, tool desc, user message
 │   ├── agent2_pcap.md           #   Agent 2 analysis prompt template
-│   └── agent3_synthesis.md      #   Agent 3 system prompt + user content template
+│   ├── agent3_synthesis.md      #   Agent 3 system prompt + user content template
+│   └── git_workflow.md          #   Git workflow reference (branch, commit, PR)
 ├── output/                      # Generated incident reports (gitignored)
 │   └── incident_report_*.md     #   Timestamped report output files
 └── pcap/                        # PCAP files mounted into containers
