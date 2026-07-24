@@ -24,8 +24,10 @@ All agents communicate through Ollama (`qwen2.5:14b`) for LLM reasoning.
 
 ```
 .
-├── AGENTS.md                    # This file — project docs, git standards
+├── AGENTS.md                    # This file — project docs, git standards, references
 ├── .gitignore                   # Ignores output/ and other build artifacts
+├── improvements.md              # Improvement plan with rationale for each finding
+├── task.md                      # Task tracker with checkboxes mapping to improvements.md
 ├── multi_agent.py               # Pipeline orchestrator + tool implementations
 ├── requirements.txt             # Python dependencies
 ├── Dockerfile                   # Container build for hunt service
@@ -81,6 +83,12 @@ Two services:
 
 ### `output/`
 Contains timestamped incident reports (`incident_report_YYYYMMDD_HHMMSS.md`). Each run appends a new file. This directory is gitignored.
+
+### `improvements.md`
+Comprehensive codebase review cross-referenced against the [TrustedSec Log4j Playbook](https://trustedsec.com/blog/log4j-playbook). Covers security, architecture, functional gaps, code quality, testing, observability, documentation, and DevOps improvements with a prioritized roadmap.
+
+### `task.md`
+Checklist tracking all improvement items from `improvements.md`. Organized by priority (P0-P3) with file:line locations for each change. Mark items `[x]` as completed.
 
 ---
 

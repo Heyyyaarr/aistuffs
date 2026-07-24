@@ -13,7 +13,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 CONFIG = {
     "SPLUNK_HOST": os.environ.get("SPLUNK_HOST", "https://localhost:8089"),
     "SPLUNK_USER": os.environ.get("SPLUNK_USER", "admin"),
-    "SPLUNK_PASS": os.environ.get("SPLUNK_PASS", "Cybercapstone123!"),
+    "SPLUNK_PASS": os.environ.get("SPLUNK_PASS", ""),
+    "SPLUNK_VERIFY_SSL": os.environ.get("SPLUNK_VERIFY_SSL", "true"),
     "PCAP_DIRECTORY": os.environ.get("PCAP_DIRECTORY", "/Users/josephstafford/Downloads/CodePathProject"),
     "REQUIRED_PCAPS": os.environ.get("REQUIRED_PCAPS", "pcapA.pcap,pcapB.pcap").split(","),
     "OLLAMA_HOST": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
@@ -83,6 +84,9 @@ def tool_query_splunk(search_query: str) -> str:
             return "SPLUNK_WARNING: 0 events found across indexed data."
 
         timestamps = sorted([item.get("_time") for item in data if item.get("_time")])
+        if not timestamps:
+            return f"SPLUNK_WARNING: {len(data)} events found but none contain _time fields."
+
         time_summary = f"TIME RANGE OF LOG ACTIVITY: Earliest = {timestamps[0]} | Latest = {timestamps[-1]} (Total Events: {len(data)})\n\n"
 
         raw_logs = [item.get("_raw", str(item)) for item in data[:25]]
