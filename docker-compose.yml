@@ -1,0 +1,34 @@
+services:
+  splunk:
+    image: splunk/splunk:latest
+    hostname: splunk
+    container_name: splunk
+    environment:
+      - SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com
+      - SPLUNK_START_ARGS=--accept-license
+      - SPLUNK_PASSWORD=Cybercapstone123!
+    ports:
+      - "8000:8000"
+      - "8089:8089"
+    volumes:
+      - splunk-var:/opt/splunk/var
+      - splunk-etc:/opt/splunk/etc
+    restart: unless-stopped
+
+  hunt:
+    build: .
+    container_name: multi-agent-hunt
+    environment:
+      - SPLUNK_HOST=https://splunk:8089
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - PCAP_DIRECTORY=/workspace/pcap
+    volumes:
+      - ./pcap:/workspace/pcap
+      - ./output:/workspace/output
+    depends_on:
+      splunk:
+        condition: service_healthy
+
+volumes:
+  splunk-var:
+  splunk-etc:
