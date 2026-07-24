@@ -24,8 +24,14 @@ Repeatable steps for branching, committing, pushing, and opening PRs.
 5. **Create PR**
    - `gh pr create --title "<type>: <description>" --body "<summary of changes, how to test, config notes>"`
 
-6. **Open in browser**
+6. **Open in browser for merge**
    - `open <pr-url>` (macOS) or `xdg-open <pr-url>` (Linux)
+   - Ask the user to merge on GitHub and come back
+
+7. **Post-merge cleanup**
+   - Switch to main: `git checkout main`
+   - Fetch and prune: `git fetch origin --prune`
+   - Pull latest: `git pull origin main`
 
 ## Commit message types
 
@@ -39,6 +45,7 @@ Repeatable steps for branching, committing, pushing, and opening PRs.
 
 ## Rules
 
+- Never push directly to `main` — all changes go through a PR
 - First line ≤ 72 characters
 - Imperative mood ("add" not "added")
 - Never commit secrets or unintended files

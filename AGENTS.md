@@ -26,8 +26,10 @@ All agents communicate through Ollama (`qwen2.5:14b`) for LLM reasoning.
 .
 ├── AGENTS.md                    # This file — project docs, git standards, references
 ├── .gitignore                   # Ignores output/ and other build artifacts
-├── improvements.md              # Improvement plan with rationale for each finding
-├── task.md                      # Task tracker with checkboxes mapping to improvements.md
+├── codetools/                    # Agent workflow references & task tracking
+│   ├── improvements.md           #   Improvement plan with rationale for each finding
+│   ├── task.md                   #   Task tracker mapping to improvements.md
+│   └── git_workflow.md           #   Git workflow reference (branch, commit, PR)
 ├── multi_agent.py               # Pipeline orchestrator + tool implementations
 ├── requirements.txt             # Python dependencies
 ├── Dockerfile                   # Container build for hunt service
@@ -35,8 +37,7 @@ All agents communicate through Ollama (`qwen2.5:14b`) for LLM reasoning.
 ├── agents/                      # AI prompt files loaded at runtime
 │   ├── agent1_siem.md           #   Agent 1 system prompt, tool desc, user message
 │   ├── agent2_pcap.md           #   Agent 2 analysis prompt template
-│   ├── agent3_synthesis.md      #   Agent 3 system prompt + user content template
-│   └── git_workflow.md          #   Git workflow reference (branch, commit, PR)
+│   └── agent3_synthesis.md      #   Agent 3 system prompt + user content template
 ├── output/                      # Generated incident reports (gitignored)
 │   └── incident_report_*.md     #   Timestamped report output files
 └── pcap/                        # PCAP files mounted into containers
@@ -85,10 +86,10 @@ Two services:
 ### `output/`
 Contains timestamped incident reports (`incident_report_YYYYMMDD_HHMMSS.md`). Each run appends a new file. This directory is gitignored.
 
-### `improvements.md`
+### `codetools/improvements.md`
 Comprehensive codebase review cross-referenced against the [TrustedSec Log4j Playbook](https://trustedsec.com/blog/log4j-playbook). Covers security, architecture, functional gaps, code quality, testing, observability, documentation, and DevOps improvements with a prioritized roadmap.
 
-### `task.md`
+### `codetools/task.md`
 Checklist tracking all improvement items from `improvements.md`. Organized by priority (P0-P3) with file:line locations for each change. Mark items `[x]` as completed.
 
 ---
@@ -205,6 +206,7 @@ chore: add docker-compose with Splunk and hunt services
 ```
 
 Rules:
+- Never push directly to `main` — all changes must go through a PR
 - First line ≤ 72 characters
 - Use imperative mood ("add" not "added" or "adds")
 - Reference issue numbers when applicable
