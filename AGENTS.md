@@ -206,6 +206,7 @@ chore: add docker-compose with Splunk and hunt services
 ```
 
 Rules:
+- Never push directly to `main` — all changes must go through a PR
 - First line ≤ 72 characters
 - Use imperative mood ("add" not "added" or "adds")
 - Reference issue numbers when applicable

@@ -45,6 +45,7 @@ Repeatable steps for branching, committing, pushing, and opening PRs.
 
 ## Rules
 
+- Never push directly to `main` — all changes go through a PR
 - First line ≤ 72 characters
 - Imperative mood ("add" not "added")
 - Never commit secrets or unintended files
