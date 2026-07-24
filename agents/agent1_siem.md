@@ -12,4 +12,4 @@ Description: Query Splunk SIEM for JNDI or LDAP indicators.
 
 ## user_message
 
-Execute a Splunk search for any Log4j or JNDI exploitation activity across all time periods.
+Execute a Splunk search for any Log4j or JNDI exploitation activity across all time periods. Use the `query_splunk` tool to perform the search.
