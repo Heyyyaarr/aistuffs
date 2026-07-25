@@ -18,17 +18,21 @@ Repeatable steps for branching, committing, pushing, and opening PRs.
    - `git commit -m "<type>: <imperative description>"` — first line ≤ 72 chars
    - Verify no secrets or unintended files in the commit
 
-4. **Push**
+4. **Update task tracker**
+   - Edit `codetools/task.md`: mark the item `[x]` and append the commit SHA
+   - Stage and amend: `git add codetools/task.md && git commit --amend --no-edit`
+
+5. **Push**
    - `git push -u origin <branch-name>`
 
-5. **Create PR**
+6. **Create PR**
    - `gh pr create --title "<type>: <description>" --body "<summary of changes, how to test, config notes>"`
 
-6. **Open in browser for merge**
+7. **Open in browser for merge**
    - `open <pr-url>` (macOS) or `xdg-open <pr-url>` (Linux)
    - Ask the user to merge on GitHub and come back
 
-7. **Post-merge cleanup**
+8. **Post-merge cleanup**
    - Switch to main: `git checkout main`
    - Fetch and prune: `git fetch origin --prune`
    - Pull latest: `git pull origin main`
