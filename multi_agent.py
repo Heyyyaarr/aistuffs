@@ -67,8 +67,12 @@ def tool_query_splunk(search_query: str) -> str:
         data = res.json().get("results", []) if res.status_code == 200 else []
 
         if not data:
-            print("  [Splunk Tool] 0 results. Executing wide raw log search for JNDI/LDAP...")
-            fallback_spl = 'search index=* "jndi" OR "${" OR "ldap" OR "rmi" | stats count min(_time) as earliest max(_time) as latest by _time, src_ip, dest_ip, _raw'
+            print("  [Splunk Tool] 0 results. Executing wide raw log search for JNDI/LDAP (Playbook §4.1)...")
+            fallback_spl = (
+                'search index=* ("jndi" OR "${" OR "ldap" OR "rmi" OR "lower:" OR "upper:" OR "env:" OR "::-j" OR "jndi" OR "log4j") '
+                '| eval obfuscated=if(match(_raw,"\\\\$\\\\{.*:.*ndi"),"YES","NO") '
+                '| stats count min(_time) as earliest max(_time) as latest by _time, src_ip, dest_ip, obfuscated, _raw'
+            )
 
             res = requests.post(
                 url,
@@ -101,8 +105,22 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
     if not os.path.exists(target_path):
         return f"PCAP_ERROR: File '{pcap_filename}' not found."
 
-    print(f"  [PCAP Tool] Extracting full frame payloads from: {pcap_filename}...")
+    print(f"  [PCAP Tool] Extracting full frame payloads from: {pcap_filename} (Playbook §4.3)...")
     try:
+        dns_cmd = [
+            "tshark", "-r", target_path, "-n",
+            "-T", "fields",
+            "-e", "frame.number",
+            "-e", "frame.time",
+            "-e", "ip.src",
+            "-e", "ip.dst",
+            "-e", "dns.qry.name",
+            "-e", "dns.flags.response",
+            "-Y", "dns",
+        ]
+        dns_res = subprocess.run(dns_cmd, capture_output=True, text=True, timeout=15)
+        dns_output = dns_res.stdout.strip() if dns_res.returncode == 0 else ""
+
         tshark_cmd = [
             "tshark", "-r", target_path, "-n",
             "-T", "fields",
@@ -128,9 +146,13 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
             return f"PCAP_SUCCESS: '{pcap_filename}' parsed, 0 usable IP frames."
 
         total_packets = len(lines)
-        target_ports = {"389", "636", "1099", "1389"}
+        jndi_ports = {"389", "636", "1099", "1389"}
+        suspicious_uas = {"curl", "wget", "powershell", "python-requests", "go-http-client", "bot", "scanner"}
         summaries = []
         jndi_count = 0
+        obfuscated_jndi_count = 0
+        suspicious_ua_count = 0
+        callback_count = 0
 
         for line in lines:
             parts = line.split("\t")
@@ -149,10 +171,19 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
             raw_text = parts[10] if len(parts) > 10 else ""
 
             combined_payload = f"{uri} {ua} {body} {raw_text}".lower()
-            contains_jndi = "jndi" in combined_payload or "${" in combined_payload or "ldap" in combined_payload
-            is_outbound_ldap = dstport in target_ports
 
-            if contains_jndi or is_outbound_ldap or method:
+            # Raw JNDI detection (Playbook §4.1)
+            contains_jndi = "jndi:" in combined_payload or "${" in combined_payload
+            # Obfuscated JNDI detection: ${lower:j}ndi, ${upper:j}ndi, ${env:...}, etc.
+            contains_obfuscated = bool(re.search(r'\$\{(lower|upper|env|::-|sys|hn|host)', combined_payload))
+            # Outbound LDAP/RMI on JNDI callback ports (Playbook §4.3)
+            is_outbound_jndi = dstport in jndi_ports
+            # Suspicious user-agents (Playbook §4.2, §4.3)
+            has_suspicious_ua = any(sua in ua.lower() for sua in suspicious_uas) if ua else False
+            # Callback to external IP via HTTP (Playbook §4.3)
+            is_callback = method and dstport == "80" and not uri.startswith("/")
+
+            if contains_jndi or contains_obfuscated or is_outbound_jndi or has_suspicious_ua or is_callback or method:
                 entry = f"Frame {frame_num}: {frame_time} | {src} -> {dst} | {proto}"
                 if method or uri:
                     entry += f" | HTTP {method} {uri}"
@@ -162,25 +193,48 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
                     entry += f" | Body: {body[:120]}"
 
                 if contains_jndi:
-                    entry += " | *** CRITICAL ALERT: Log4j/JNDI Exploit String Detected ***"
+                    entry += " | *** CRITICAL: Log4j JNDI Exploit String ***"
                     jndi_count += 1
-                if is_outbound_ldap:
-                    entry += f" | *** ALERT: Outbound JNDI/LDAP/RMI Connection on Port {dstport} ***"
+                if contains_obfuscated:
+                    entry += " | *** CRITICAL: Obfuscated JNDI Exploit (${lower:/${upper:/${env:}) ***"
+                    obfuscated_jndi_count += 1
+                if is_outbound_jndi:
+                    entry += f" | *** ALERT: Outbound JNDI/LDAP/RMI on Port {dstport} ***"
+                if has_suspicious_ua:
+                    entry += " | *** ALERT: Suspicious UA (curl/wget/powershell) ***"
+                    suspicious_ua_count += 1
+                if is_callback:
+                    entry += " | *** ALERT: Potential C2 Callback ***"
+                    callback_count += 1
 
                 summaries.append(entry)
 
         earliest_time = lines[0].split("\t")[1]
         latest_time = lines[-1].split("\t")[1]
 
+        dns_section = ""
+        if dns_output:
+            dns_lines = dns_output.splitlines()
+            external_queries = [l for l in dns_lines if not l.endswith("\t1") and "\t" in l]
+            if external_queries:
+                dns_section = (
+                    f"\n--- DNS Queries (Playbook §4.3) ---\n"
+                    + "\n".join(external_queries[:20])
+                    + "\n"
+                )
+
         header = (
             f"=== PCAP TIMELINE SUMMARY: {pcap_filename} ===\n"
             f"• Capture Window: {earliest_time} to {latest_time}\n"
             f"• Total Packets Scanned: {total_packets}\n"
-            f"• Critical JNDI Indicators Found: {jndi_count}\n"
+            f"• Critical JNDI Indicators: {jndi_count}\n"
+            f"• Obfuscated JNDI Indicators: {obfuscated_jndi_count}\n"
+            f"• Suspicious User-Agents: {suspicious_ua_count}\n"
+            f"• Potential Callbacks: {callback_count}\n"
             f"===========================================\n"
         )
 
-        return header + "\n".join(summaries[:60])
+        return header + "\n".join(summaries[:60]) + dns_section
 
     except subprocess.TimeoutExpired:
         return f"PCAP_TIMEOUT_ERROR: TShark timed out processing {pcap_filename}."
