@@ -63,4 +63,7 @@ Synthesize all evidence from Agent 1 (SIEM/Logs) and Agent 2 (PCAP/Network) into
 ### PCAP DISSECTION FINDINGS (Agent 2 — Network Analysis §4.3):
 {{PCAP_FINDINGS}}
 
-Generate the complete TrustedSec Log4j Playbook Incident Report now following the section structure defined in your system prompt.
+### VULNERABILITY SCAN FINDINGS (Agent 4 — Grype/Syft §2):
+{{VULN_FINDINGS}}
+
+Generate the complete TrustedSec Log4j Playbook Incident Report now following the section structure defined in your system prompt. Incorporate the vulnerability scan findings into §2 (Affected Systems) and §7 (Preventative Recommendations).

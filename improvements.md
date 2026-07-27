@@ -96,7 +96,7 @@ The [TrustedSec Log4j Playbook](https://trustedsec.com/blog/log4j-playbook) cove
 
 | Playbook Phase | Covered? | What's Missing |
 |---|---|---|
-| **Vulnerable Software Detection** (Section 2) | ❌ | No integration with Grype/Syft/FullHunt log4j-scan for proactive scanning. No CVE version checking. |
+| **Vulnerable Software Detection** (Section 2) | ✅ | Syft SBOM + Grype CVE scanning via Agent 4. Scans for Log4j and all other known CVEs on the target. |
 | **Prevention & Mitigation** (Section 3) | ❌ | No KB/model for recommending specific mitigations (JNDI removal, `formatMsgNoLookups`, network isolation). |
 | **Exploitation Detection** (Section 4) | ⚠️ Partial | Log analysis ✅ (Agent 1). Network analysis ✅ (Agent 2). **Endpoint analysis** ❌ — no EDR/process/ file-system telemetry. Obfuscation handling ❌ — playbook specifically warns about `${lower:}`, `${upper:}`, `${::-}` obfuscation; the SPL fallback and PCAP parser don't handle these. |
 | **Post-Exploitation** (Section 4.2-4.3) | ⚠️ Partial | Network callback detection is basic. No DNS query analysis. No curl/wget process detection. No cryptominer indicators. |
@@ -134,13 +134,30 @@ The playbook (Section 4.2) recommends checking for:
 
 The tool has no endpoint visibility. This is a known scope limitation, but it should be documented.
 
-**Fix:** Document as a known gap in AGENTS.md. Consider adding a fourth agent for endpoint log analysis (Sysmon, osquery, EDR API).
+**Fix:** Document as a known gap in AGENTS.md. Consider adding an agent for endpoint log analysis (Sysmon, osquery, EDR API).
 
-**d) No DNS Analysis**
+**f) No Vulnerability Scanning (Now Implemented)**
 
-The playbook (Section 4.3) recommends examining DNS for suspicious queries. The PCAP tool extracts HTTP and TCP data but doesn't analyze DNS queries.
+**Status:** ✅ Implemented as Agent 4
 
-**Fix:** Add DNS query extraction to the TShark fields (`dns.qry.name`, `dns.flags.response`). Flag queries to known malicious domains or DNS exfiltration patterns.
+**Files:** `agents/agent4_vuln_scan.md`, `multi_agent.py`
+
+Agent 4 uses Syft (SBOM generation) and Grype (vulnerability scanning) to identify known CVEs in the target system. It runs in parallel with Agents 1 and 2, and its findings are passed to Agent 3 for inclusion in the final report.
+
+Key capabilities:
+- Discovers all installed packages via Syft
+- Scans for known vulnerabilities via Grype
+- Severity breakdown (Critical, High, Medium, Low, Negligible)
+- Log4j-specific CVE detection (CVE-2021-44228, CVE-2021-45046, etc.)
+- Top 10 critical/high vulnerabilities reported with fix versions
+
+Configure with `SCAN_TARGET` environment variable (directory path or container image name).
+
+**d) DNS Analysis (Now Implemented)**
+
+**Status:** ✅ Implemented
+
+The PCAP tool now extracts DNS queries via TShark JSON output (`dns.qry.name`, `dns.flags.response`). External DNS queries are surfaced in the PCAP analysis results under a "DNS Queries" section. Configurable display filter and max packet limits prevent resource exhaustion on large captures.
 
 **e) Report Template Has Placeholder Values**
 
@@ -365,41 +382,43 @@ No GitHub Actions workflow for:
 
 ## 9. Prioritized Roadmap
 
-| Priority | Area | Effort | Impact |
-|----------|------|--------|--------|
-| **P0** | Remove hardcoded credentials (1.1) | 30 min | Security — prevents credential leak |
-| **P0** | Enable SSL verification by default (1.2) | 15 min | Security — prevents MITM |
-| **P0** | Fix empty timestamps IndexError (4.2) | 5 min | Prevents runtime crash |
-| **P1** | Add retry logic for network calls (4.4) | 1 hr | Reliability in production |
-| **P1** | Add JNDI obfuscation handling (3.1a) | 2 hr | Core detection gap |
-| **P1** | Add test suite (5.1) | 4 hr | Enables safe refactoring |
-| **P1** | Replace `print()` with logging (4.7) | 1 hr | Observability |
-| **P2** | Parallelize Splunk + PCAP agents (2.3) | 1 hr | Performance (2x speedup) |
-| **P2** | Robust TShark parsing (4.1) | 2 hr | Prevents false negatives |
-| **P2** | Add IOC feed enrichment (3.1b) | 3 hr | Threat intel context |
-| **P2** | Add JSON report output (6.1) | 2 hr | Machine readability |
-| **P3** | Agent plugin architecture (2.4) | 6 hr | Extensibility |
-| **P3** | Endpoint analysis agent (3.1c) | 8 hr | Complete coverage |
-| **P3** | CI/CD pipeline (8.3) | 3 hr | Developer workflow |
-| **P3** | DNS analysis in PCAP tool (3.1d) | 2 hr | Broader detection |
-| **P3** | Pre-commit hooks (7.2) | 1 hr | Code quality automation |
+| Priority | Area | Effort | Impact | Status |
+|----------|------|--------|--------|--------|
+| **P0** | Remove hardcoded credentials (1.1) | 30 min | Security — prevents credential leak | ✅ |
+| **P0** | Enable SSL verification by default (1.2) | 15 min | Security — prevents MITM | ✅ |
+| **P0** | Fix empty timestamps IndexError (4.2) | 5 min | Prevents runtime crash | ✅ |
+| **P1** | Add retry logic for network calls (4.4) | 1 hr | Reliability in production | ✅ |
+| **P1** | Add JNDI obfuscation handling (3.1a) | 2 hr | Core detection gap | ✅ |
+| **P1** | Add test suite (5.1) | 4 hr | Enables safe refactoring | ✅ |
+| **P1** | Replace `print()` with logging (4.7) | 1 hr | Observability | ✅ |
+| **P2** | Parallelize Splunk + PCAP agents (2.3) | 1 hr | Performance (2x speedup) | ✅ |
+| **P2** | Robust TShark parsing (4.1) | 2 hr | Prevents false negatives | ✅ |
+| **P2** | Add IOC feed enrichment (3.1b) | 3 hr | Threat intel context | ✅ |
+| **P2** | Add JSON report output (6.1) | 2 hr | Machine readability | ✅ |
+| **P2** | Add vulnerability scanning agent (3.1c) | 4 hr | CVE detection | ✅ |
+| **P2** | DNS analysis in PCAP tool (3.1d) | 2 hr | Broader detection | ✅ |
+| **P3** | Agent plugin architecture (2.4) | 6 hr | Extensibility | ❌ |
+| **P3** | Endpoint analysis agent (Sysmon/EDR) | 8 hr | Complete coverage | ❌ |
+| **P3** | CI/CD pipeline (8.3) | 3 hr | Developer workflow | ❌ |
+| **P3** | Pre-commit hooks (7.2) | 1 hr | Code quality automation | ✅ |
+| **P3** | .dockerignore (8.2) | 15 min | Build context hygiene | ✅ |
 
 ---
 
 ## 10. TrustedSec Playbook Alignment Summary
 
-| Playbook Requirement | Status | Action Needed |
-|---|---|---|
-| Search logs for `jndi:ldap`, `jndi:rmi`, `jndi:dns` | ✅ | Basic coverage |
-| Handle obfuscated patterns (`${lower:}`, `${::-}`) | ❌ | Add normalization layer |
-| Search compressed logs | ❌ | SPL `index=*` covers this in Splunk |
-| Endpoint analysis (process, file, EDR) | ❌ | New agent needed |
-| Network callback detection | ⚠️ | Partial — add DNS, improve TCP analysis |
-| DNS query analysis | ❌ | Add to TShark extraction |
-| IOC feed cross-referencing | ❌ | Add enrichment step |
-| Known scanning IP lists | ❌ | Add gist/crowdsourced feed imports |
-| Vulnerability scanning integration | ❌ | New agent or documented manual step |
-| Mitigation recommendations | ⚠️ | Let Agent 3 LLM handle this, but ground with playbook content |
+| Playbook Requirement | Status | Notes |
+|---|---|---|---|
+| Search logs for `jndi:ldap`, `jndi:rmi`, `jndi:dns` | ✅ | Agent 1 — basic coverage |
+| Handle obfuscated patterns (`${lower:}`, `${::-}`) | ✅ | `normalize_jndi_payload()` in `multi_agent.py` |
+| Search compressed logs | ✅ | SPL `index=*` covers this in Splunk |
+| Endpoint analysis (process, file, EDR) | ❌ | Future agent needed |
+| Network callback detection | ✅ | Agent 2 — HTTP + DNS + LDAP callback ports |
+| DNS query analysis | ✅ | TShark JSON extraction with `dns.qry.name` |
+| IOC feed cross-referencing | ✅ | `enrich_iocs()` with gist + Zeek feeds |
+| Known scanning IP lists | ✅ | IOC feed enrichment covers this |
+| Vulnerability scanning integration | ✅ | Agent 4 — Syft SBOM + Grype CVE scan |
+| Mitigation recommendations | ✅ | Agent 3 LLM with playbook-grounded prompts |
 
 ---
 

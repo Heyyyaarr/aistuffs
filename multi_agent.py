@@ -1,27 +1,88 @@
 import os
+import sys
 import re
 import json
+import time
+import logging
+import logging.handlers
 import datetime
 import requests
 import subprocess
-import urllib3
+import concurrent.futures
 import ollama
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.handlers.RotatingFileHandler(
+            os.path.join(
+                os.environ.get(
+                    "OUTPUT_DIR",
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "output"),
+                ),
+                "pipeline.log",
+            ),
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+        ),
+    ],
+)
+log = logging.getLogger(__name__)
 
-# --- CONFIGURATION ---
+_splunk_pass = os.environ.get("SPLUNK_PASS")
+if not _splunk_pass:
+    sys.exit("FATAL: SPLUNK_PASS environment variable is required.")
+
 CONFIG = {
     "SPLUNK_HOST": os.environ.get("SPLUNK_HOST", "https://localhost:8089"),
     "SPLUNK_USER": os.environ.get("SPLUNK_USER", "admin"),
-    "SPLUNK_PASS": os.environ.get("SPLUNK_PASS", ""),
-    "SPLUNK_VERIFY_SSL": os.environ.get("SPLUNK_VERIFY_SSL", "true"),
-    "PCAP_DIRECTORY": os.environ.get("PCAP_DIRECTORY", "/Users/josephstafford/Downloads/CodePathProject"),
-    "REQUIRED_PCAPS": os.environ.get("REQUIRED_PCAPS", "pcapA.pcap,pcapB.pcap").split(","),
+    "SPLUNK_PASS": _splunk_pass,
+    "SPLUNK_VERIFY_SSL": os.environ.get("SPLUNK_VERIFY_SSL", "true").lower() == "true",
+    "PCAP_DIRECTORY": os.environ.get(
+        "PCAP_DIRECTORY", "/Users/josephstafford/Downloads/CodePathProject"
+    ),
+    "REQUIRED_PCAPS": os.environ.get("REQUIRED_PCAPS", "pcapA.pcap,pcapB.pcap").split(
+        ","
+    ),
     "OLLAMA_HOST": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
     "LLM_MODEL": os.environ.get("LLM_MODEL", "qwen2.5:14b"),
+    "MAX_LOG_EVENTS": int(os.environ.get("MAX_LOG_EVENTS", "25")),
+    "MAX_PCAP_PACKETS": int(os.environ.get("MAX_PCAP_PACKETS", "50000")),
+    "HTTP_RETRIES": int(os.environ.get("HTTP_RETRIES", "3")),
+    "HTTP_RETRY_DELAY": int(os.environ.get("HTTP_RETRY_DELAY", "2")),
+    "SCAN_TARGET": os.environ.get("SCAN_TARGET", ""),
 }
 
 AGENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents")
+
+
+class PipelineTelemetry:
+    def __init__(self):
+        self.agent_durations: dict[str, float] = {}
+        self.splunk_results_count = 0
+        self.pcap_packets_processed = 0
+        self.pcap_packets_flagged = 0
+        self.vuln_packages_found = 0
+        self.vuln_cves_found = 0
+        self.errors: list[str] = []
+
+    def summary(self) -> str:
+        parts = ["Pipeline Telemetry:"]
+        for agent, dur in self.agent_durations.items():
+            parts.append(f"  {agent}: {dur:.2f}s")
+        parts.append(f"  Splunk results: {self.splunk_results_count}")
+        parts.append(f"  PCAP packets: {self.pcap_packets_processed} processed, {self.pcap_packets_flagged} flagged")
+        parts.append(f"  Vulnerabilities: {self.vuln_packages_found} packages, {self.vuln_cves_found} CVEs")
+        if self.errors:
+            parts.append(f"  Errors ({len(self.errors)}):")
+            for e in self.errors:
+                parts.append(f"    - {e}")
+        return "\n".join(parts)
+
+
+telemetry = PipelineTelemetry()
 
 
 def load_section(filepath: str, section: str) -> str:
@@ -34,12 +95,226 @@ def load_section(filepath: str, section: str) -> str:
     raise ValueError(f"Section '{section}' not found in {filepath}")
 
 
+def retry_request(
+    method: str, url: str, max_retries: int = None, **kwargs
+) -> requests.Response:
+    max_retries = max_retries or CONFIG["HTTP_RETRIES"]
+    delay = CONFIG["HTTP_RETRY_DELAY"]
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            res = requests.request(method, url, **kwargs)
+            if res.status_code < 500:
+                return res
+            log.warning("HTTP %d on %s (attempt %d/%d)", res.status_code, url, attempt, max_retries)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            log.warning("Request failed for %s: %s (attempt %d/%d)", url, e, attempt, max_retries)
+        if attempt < max_retries:
+            time.sleep(delay * (2 ** (attempt - 1)))
+    raise last_exc or RuntimeError(f"Request to {url} failed after {max_retries} retries")
+
+
+def normalize_jndi_payload(text: str) -> str:
+    resolved = text
+    for _ in range(10):
+        prev = resolved
+        resolved = re.sub(
+            r'\$\{(lower):([^}]*)\}',
+            lambda m: m.group(2).lower(),
+            resolved,
+            flags=re.IGNORECASE,
+        )
+        resolved = re.sub(
+            r'\$\{(upper):([^}]*)\}',
+            lambda m: m.group(2).upper(),
+            resolved,
+            flags=re.IGNORECASE,
+        )
+        resolved = re.sub(
+            r'\$\{(?:env|sys|hn|host):([^}]*)\}',
+            lambda m: m.group(1),
+            resolved,
+            flags=re.IGNORECASE,
+        )
+        resolved = re.sub(
+            r'\$\{::([^}]*)\}',
+            lambda m: m.group(1).lstrip("-"),
+            resolved,
+        )
+        if resolved == prev:
+            break
+    return resolved
+
+
+IOC_FEED_URLS = [
+    "https://gist.github.com/gnremy/c546c7911d5f876f263309d7161a7217/raw",
+    "https://raw.githubusercontent.com/CriticalPathSecurity/Zeek-Intelligence-Feeds/master/log4j_ip.intel",
+]
+
+_ioc_cache = None  # type: set[str] | None
+
+
+def _load_ioc_feeds(timeout: int = 10) -> set[str]:
+    global _ioc_cache
+    if _ioc_cache is not None:
+        return _ioc_cache
+    iocs: set[str] = set()
+    for url in IOC_FEED_URLS:
+        try:
+            res = requests.get(url, timeout=timeout)
+            if res.status_code == 200:
+                for line in res.text.splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        for token in line.split(","):
+                            token = token.strip()
+                            if token:
+                                iocs.add(token)
+        except Exception as e:
+            log.warning("Failed to fetch IOC feed %s: %s", url, e)
+    _ioc_cache = iocs
+    log.info("Loaded %d IOC indicators from %d feeds", len(iocs), len(IOC_FEED_URLS))
+    return iocs
+
+
+def enrich_iocs(ips: list[str], domains: list[str]) -> dict[str, list[str]]:
+    iocs = _load_ioc_feeds()
+    matches: dict[str, list[str]] = {"ips": [], "domains": []}
+    for ip in ips:
+        if ip in iocs:
+            matches["ips"].append(ip)
+    for domain in domains:
+        if domain in iocs:
+            matches["domains"].append(domain)
+    return matches
+
+
+# ==========================================
+# VULNERABILITY SCANNING (Syft + Grype)
+# ==========================================
+
+def tool_syft_sbom(scan_target: str = None) -> str:
+    target = scan_target or CONFIG["SCAN_TARGET"]
+    if not target:
+        return "VULN_SKIP: No scan target configured (set SCAN_TARGET env)."
+    log.info("Running Syft SBOM on: %s", target)
+    try:
+        res = subprocess.run(
+            ["syft", target, "-o", "json"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if res.returncode != 0:
+            return f"VULN_ERROR: Syft failed: {res.stderr[:500]}"
+        return res.stdout
+    except FileNotFoundError:
+        return "VULN_ERROR: Syft not found on PATH."
+    except subprocess.TimeoutExpired:
+        return "VULN_ERROR: Syft timed out (120s)."
+    except Exception as e:
+        return f"VULN_ERROR: Syft exception: {e}"
+
+
+def tool_grype_scan(scan_target: str = None) -> str:
+    target = scan_target or CONFIG["SCAN_TARGET"]
+    if not target:
+        return "VULN_SKIP: No scan target configured (set SCAN_TARGET env)."
+    log.info("Running Grype vulnerability scan on: %s", target)
+    try:
+        res = subprocess.run(
+            ["grype", target, "-o", "json"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if res.returncode != 0:
+            return f"VULN_ERROR: Grype failed: {res.stderr[:500]}"
+        return res.stdout
+    except FileNotFoundError:
+        return "VULN_ERROR: Grype not found on PATH."
+    except subprocess.TimeoutExpired:
+        return "VULN_ERROR: Grype timed out (300s)."
+    except Exception as e:
+        return f"VULN_ERROR: Grype exception: {e}"
+
+
+def summarize_vuln_scan(grype_json: str, syft_json: str) -> str:
+    try:
+        grype_data = json.loads(grype_json)
+    except (json.JSONDecodeError, ValueError):
+        grype_data = {}
+    try:
+        syft_data = json.loads(syft_json)
+    except (json.JSONDecodeError, ValueError):
+        syft_data = {}
+    if not grype_data and not syft_data:
+        return "VULN_ERROR: Failed to parse vulnerability scan output."
+
+    artifacts = syft_data.get("artifacts", [])
+    matches = grype_data.get("matches", [])
+
+    telemetry.vuln_packages_found = len(artifacts)
+    telemetry.vuln_cves_found = len(matches)
+
+    severity_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Negligible": 0}
+    by_severity: dict[str, list[dict]] = {s: [] for s in severity_counts}
+
+    log4j_cves = {"CVE-2021-44228", "CVE-2021-45046", "CVE-2021-45105", "CVE-2021-44832"}
+    log4j_matches = []
+
+    for m in matches:
+        vuln = m.get("vulnerability", {})
+        sev = vuln.get("severity", "Unknown")
+        if sev in severity_counts:
+            severity_counts[sev] += 1
+            by_severity[sev].append(m)
+        if vuln.get("id") in log4j_cves:
+            log4j_matches.append(m)
+
+    lines = [
+        "=== VULNERABILITY SCAN SUMMARY ===",
+        f"Packages cataloged: {len(artifacts)}",
+        f"Vulnerabilities found: {len(matches)}",
+        "",
+        "Severity Breakdown:",
+    ]
+    for sev in ("Critical", "High", "Medium", "Low", "Negligible"):
+        if severity_counts[sev]:
+            lines.append(f"  {sev}: {severity_counts[sev]}")
+
+    if log4j_matches:
+        lines.extend(["", "Log4j-Related Vulnerabilities:"])
+        for m in log4j_matches[:5]:
+            v = m.get("vulnerability", {})
+            art = m.get("artifact", {})
+            fix = v.get("fix", {}).get("versions", ["none"])
+            lines.append(
+                f"  {v.get('id')} | {art.get('name')} {art.get('version')} "
+                f"| Severity: {v.get('severity')} | Fix: {', '.join(fix)}"
+            )
+
+    top_critical = by_severity.get("Critical", [])[:5]
+    top_high = by_severity.get("High", [])[:5]
+    top_all = (top_critical + top_high)[:10]
+
+    if top_all:
+        lines.extend(["", "Top Critical/High Vulnerabilities:"])
+        for m in top_all:
+            v = m.get("vulnerability", {})
+            art = m.get("artifact", {})
+            fix = v.get("fix", {}).get("versions", ["none"])
+            lines.append(
+                f"  {v.get('id')} | {art.get('name')} {art.get('version')} "
+                f"| {v.get('severity')} | Fix: {', '.join(fix)}"
+            )
+
+    return "\n".join(lines)
+
+
 # ==========================================
 # TOOL DEFINITIONS
 # ==========================================
 
 def tool_query_splunk(search_query: str) -> str:
-    print(f"  [Splunk Tool] SPL: {search_query}")
+    log.info("Splunk query: %s", search_query)
 
     clean_query = search_query.strip()
     if not clean_query.startswith("search") and not clean_query.startswith("|"):
@@ -56,48 +331,117 @@ def tool_query_splunk(search_query: str) -> str:
             "latest_time": "now",
         }
 
-        res = requests.post(
+        res = retry_request(
+            "POST",
             url,
             auth=(CONFIG["SPLUNK_USER"], CONFIG["SPLUNK_PASS"]),
             data=payload,
-            verify=False,
+            verify=CONFIG["SPLUNK_VERIFY_SSL"],
             timeout=30,
         )
 
         data = res.json().get("results", []) if res.status_code == 200 else []
 
         if not data:
-            print("  [Splunk Tool] 0 results. Executing wide raw log search for JNDI/LDAP (Playbook §4.1)...")
-            fallback_spl = (
+            log.info("0 results from Splunk; executing fallback JNDI/LDAP search")
+            fallback_spl = CONFIG.get(
+                "FALLBACK_SPL",
                 'search index=* ("jndi" OR "${" OR "ldap" OR "rmi" OR "lower:" OR "upper:" OR "env:" OR "::-j" OR "jndi" OR "log4j") '
                 '| eval obfuscated=if(match(_raw,"\\\\$\\\\{.*:.*ndi"),"YES","NO") '
-                '| stats count min(_time) as earliest max(_time) as latest by _time, src_ip, dest_ip, obfuscated, _raw'
+                '| stats count min(_time) as earliest max(_time) as latest by _time, src_ip, dest_ip, obfuscated, _raw',
             )
 
-            res = requests.post(
+            res = retry_request(
+                "POST",
                 url,
                 auth=(CONFIG["SPLUNK_USER"], CONFIG["SPLUNK_PASS"]),
-                data={"search": fallback_spl, "exec_mode": "oneshot", "output_mode": "json", "earliest_time": "0", "latest_time": "now"},
-                verify=False,
+                data={
+                    "search": fallback_spl,
+                    "exec_mode": "oneshot",
+                    "output_mode": "json",
+                    "earliest_time": "0",
+                    "latest_time": "now",
+                },
+                verify=CONFIG["SPLUNK_VERIFY_SSL"],
                 timeout=30,
             )
             if res.status_code == 200:
                 data = res.json().get("results", [])
 
         if not data:
+            telemetry.splunk_results_count = 0
             return "SPLUNK_WARNING: 0 events found across indexed data."
 
         timestamps = sorted([item.get("_time") for item in data if item.get("_time")])
         if not timestamps:
+            telemetry.splunk_results_count = len(data)
             return f"SPLUNK_WARNING: {len(data)} events found but none contain _time fields."
 
+        telemetry.splunk_results_count = len(data)
         time_summary = f"TIME RANGE OF LOG ACTIVITY: Earliest = {timestamps[0]} | Latest = {timestamps[-1]} (Total Events: {len(data)})\n\n"
 
-        raw_logs = [item.get("_raw", str(item)) for item in data[:25]]
+        max_events = CONFIG["MAX_LOG_EVENTS"]
+        raw_logs = [item.get("_raw", str(item)) for item in data[:max_events]]
         return time_summary + json.dumps(raw_logs, indent=2)
 
     except Exception as e:
+        telemetry.errors.append(f"Splunk query failed: {e}")
         return f"SPLUNK_ERROR: {str(e)}"
+
+
+def _get_json_field(pkt: dict, *keys: str) -> str:
+    try:
+        layers = pkt.get("_source", {}).get("layers", {})
+        val = layers
+        for key in keys:
+            if isinstance(val, dict):
+                val = val.get(key)
+            else:
+                return ""
+        if isinstance(val, list) and val:
+            return str(val[0])
+        return str(val) if val else ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _parse_tshark_field_output(output: str) -> list[dict]:
+    try:
+        packets = json.loads(output)
+        if not isinstance(packets, list):
+            return []
+        result = []
+        for pkt in packets:
+            result.append(
+                {
+                    "frame.number": _get_json_field(pkt, "frame", "frame.number"),
+                    "frame.time": _get_json_field(pkt, "frame", "frame.time"),
+                    "ip.src": _get_json_field(pkt, "ip", "ip.src"),
+                    "ip.dst": _get_json_field(pkt, "ip", "ip.dst"),
+                    "protocol": _get_json_field(pkt, "_ws", "_ws.col.Protocol"),
+                    "http.request.method": _get_json_field(
+                        pkt, "http", "http.request.method"
+                    ),
+                    "http.request.uri": _get_json_field(
+                        pkt, "http", "http.request.uri"
+                    ),
+                    "http.user_agent": _get_json_field(
+                        pkt, "http", "http.user_agent"
+                    ),
+                    "http.file_data": _get_json_field(
+                        pkt, "http", "http.file_data"
+                    ),
+                    "tcp.dstport": _get_json_field(pkt, "tcp", "tcp.dstport"),
+                    "text": _get_json_field(pkt, "text", "text"),
+                    "dns.qry.name": _get_json_field(pkt, "dns", "dns.qry.name"),
+                    "dns.flags.response": _get_json_field(
+                        pkt, "dns", "dns.flags.response"
+                    ),
+                }
+            )
+        return result
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 def tool_analyze_pcap(pcap_filename: str) -> str:
@@ -105,25 +449,12 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
     if not os.path.exists(target_path):
         return f"PCAP_ERROR: File '{pcap_filename}' not found."
 
-    print(f"  [PCAP Tool] Extracting full frame payloads from: {pcap_filename} (Playbook §4.3)...")
+    log.info("Analyzing PCAP: %s", pcap_filename)
     try:
-        dns_cmd = [
-            "tshark", "-r", target_path, "-n",
-            "-T", "fields",
-            "-e", "frame.number",
-            "-e", "frame.time",
-            "-e", "ip.src",
-            "-e", "ip.dst",
-            "-e", "dns.qry.name",
-            "-e", "dns.flags.response",
-            "-Y", "dns",
-        ]
-        dns_res = subprocess.run(dns_cmd, capture_output=True, text=True, timeout=15)
-        dns_output = dns_res.stdout.strip() if dns_res.returncode == 0 else ""
-
-        tshark_cmd = [
-            "tshark", "-r", target_path, "-n",
-            "-T", "fields",
+        all_cmd = [
+            "tshark",
+            "-r", target_path, "-n",
+            "-T", "json",
             "-e", "frame.number",
             "-e", "frame.time",
             "-e", "ip.src",
@@ -136,54 +467,79 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
             "-e", "tcp.dstport",
             "-e", "text",
         ]
-
-        res = subprocess.run(tshark_cmd, capture_output=True, text=True, timeout=30)
+        res = subprocess.run(all_cmd, capture_output=True, text=True, timeout=30)
         if res.returncode != 0:
             return f"PCAP_ERROR: TShark error: {res.stderr}"
 
-        lines = res.stdout.strip().splitlines()
-        if not lines:
+        packets = _parse_tshark_field_output(res.stdout.strip())
+        max_packets = CONFIG["MAX_PCAP_PACKETS"]
+        if len(packets) > max_packets:
+            log.warning(
+                "Truncating PCAP analysis to %d packets (of %d)",
+                max_packets,
+                len(packets),
+            )
+            packets = packets[:max_packets]
+
+        if not packets:
             return f"PCAP_SUCCESS: '{pcap_filename}' parsed, 0 usable IP frames."
 
-        total_packets = len(lines)
+        total_packets = len(packets)
+        telemetry.pcap_packets_processed += total_packets
         jndi_ports = {"389", "636", "1099", "1389"}
-        suspicious_uas = {"curl", "wget", "powershell", "python-requests", "go-http-client", "bot", "scanner"}
+        suspicious_uas = {
+            "curl",
+            "wget",
+            "powershell",
+            "python-requests",
+            "go-http-client",
+            "bot",
+            "scanner",
+        }
         summaries = []
         jndi_count = 0
         obfuscated_jndi_count = 0
         suspicious_ua_count = 0
         callback_count = 0
+        dns_queries = []
 
-        for line in lines:
-            parts = line.split("\t")
-            if len(parts) < 5:
-                continue
-
-            frame_num, frame_time = parts[0], parts[1]
-            src = parts[2] if parts[2] else "N/A"
-            dst = parts[3] if parts[3] else "N/A"
-            proto = parts[4] if parts[4] else "N/A"
-            method = parts[5] if len(parts) > 5 else ""
-            uri = parts[6] if len(parts) > 6 else ""
-            ua = parts[7] if len(parts) > 7 else ""
-            body = parts[8] if len(parts) > 8 else ""
-            dstport = parts[9] if len(parts) > 9 else ""
-            raw_text = parts[10] if len(parts) > 10 else ""
+        for pkt in packets:
+            frame_num = pkt.get("frame.number", "?")
+            frame_time = pkt.get("frame.time", "?")
+            src = pkt.get("ip.src") or "N/A"
+            dst = pkt.get("ip.dst") or "N/A"
+            proto = pkt.get("protocol") or "N/A"
+            method = pkt.get("http.request.method", "")
+            uri = pkt.get("http.request.uri", "")
+            ua = pkt.get("http.user_agent", "")
+            body = pkt.get("http.file_data", "")
+            dstport = pkt.get("tcp.dstport", "")
+            raw_text = pkt.get("text", "")
 
             combined_payload = f"{uri} {ua} {body} {raw_text}".lower()
+            normalized_payload = normalize_jndi_payload(combined_payload)
 
-            # Raw JNDI detection (Playbook §4.1)
             contains_jndi = "jndi:" in combined_payload or "${" in combined_payload
-            # Obfuscated JNDI detection: ${lower:j}ndi, ${upper:j}ndi, ${env:...}, etc.
-            contains_obfuscated = bool(re.search(r'\$\{(lower|upper|env|::-|sys|hn|host)', combined_payload))
-            # Outbound LDAP/RMI on JNDI callback ports (Playbook §4.3)
+            contains_obfuscated = (
+                "jndi:" in normalized_payload
+                and normalized_payload != combined_payload
+            ) or bool(
+                re.search(r'\$\{(lower|upper|env|::-|sys|hn|host)', combined_payload)
+            )
             is_outbound_jndi = dstport in jndi_ports
-            # Suspicious user-agents (Playbook §4.2, §4.3)
-            has_suspicious_ua = any(sua in ua.lower() for sua in suspicious_uas) if ua else False
-            # Callback to external IP via HTTP (Playbook §4.3)
-            is_callback = method and dstport == "80" and not uri.startswith("/")
+            has_suspicious_ua = (
+                any(sua in ua.lower() for sua in suspicious_uas) if ua else False
+            )
+            is_callback = bool(method and dstport == "80" and not uri.startswith("/"))
 
-            if contains_jndi or contains_obfuscated or is_outbound_jndi or has_suspicious_ua or is_callback or method:
+            if (
+                contains_jndi
+                or contains_obfuscated
+                or is_outbound_jndi
+                or has_suspicious_ua
+                or is_callback
+                or method
+            ):
                 entry = f"Frame {frame_num}: {frame_time} | {src} -> {dst} | {proto}"
                 if method or uri:
                     entry += f" | HTTP {method} {uri}"
@@ -196,7 +552,7 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
                     entry += " | *** CRITICAL: Log4j JNDI Exploit String ***"
                     jndi_count += 1
                 if contains_obfuscated:
-                    entry += " | *** CRITICAL: Obfuscated JNDI Exploit (${lower:/${upper:/${env:}) ***"
+                    entry += " | *** CRITICAL: Obfuscated JNDI Exploit ***"
                     obfuscated_jndi_count += 1
                 if is_outbound_jndi:
                     entry += f" | *** ALERT: Outbound JNDI/LDAP/RMI on Port {dstport} ***"
@@ -209,28 +565,54 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
 
                 summaries.append(entry)
 
-        earliest_time = lines[0].split("\t")[1]
-        latest_time = lines[-1].split("\t")[1]
+        telemetry.pcap_packets_flagged += len(summaries)
+
+        dns_cmd = [
+            "tshark",
+            "-r", target_path, "-n",
+            "-T", "json",
+            "-e", "frame.number",
+            "-e", "frame.time",
+            "-e", "ip.src",
+            "-e", "ip.dst",
+            "-e", "dns.qry.name",
+            "-e", "dns.flags.response",
+            "-Y", "dns",
+        ]
+        dns_res = subprocess.run(dns_cmd, capture_output=True, text=True, timeout=15)
+        if dns_res.returncode == 0:
+            dns_packets = _parse_tshark_field_output(dns_res.stdout.strip())
+            if dns_packets:
+                for dp in dns_packets:
+                    qry_name = dp.get("dns.qry.name", "")
+                    flags = dp.get("dns.flags.response", "")
+                    if qry_name and flags != "1":
+                        dns_queries.append(
+                            f"Frame {dp.get('frame.number', '?')}: "
+                            f"{dp.get('frame.time', '?')} | "
+                            f"{dp.get('ip.src', '?')} -> {dp.get('ip.dst', '?')} | "
+                            f"DNS query: {qry_name}"
+                        )
 
         dns_section = ""
-        if dns_output:
-            dns_lines = dns_output.splitlines()
-            external_queries = [l for l in dns_lines if not l.endswith("\t1") and "\t" in l]
-            if external_queries:
-                dns_section = (
-                    f"\n--- DNS Queries (Playbook §4.3) ---\n"
-                    + "\n".join(external_queries[:20])
-                    + "\n"
-                )
+        if dns_queries:
+            dns_section = (
+                f"\n--- DNS Queries (Playbook §4.3) ---\n"
+                + "\n".join(dns_queries[:20])
+                + "\n"
+            )
+
+        earliest_time = packets[0].get("frame.time", "?")
+        latest_time = packets[-1].get("frame.time", "?")
 
         header = (
             f"=== PCAP TIMELINE SUMMARY: {pcap_filename} ===\n"
-            f"• Capture Window: {earliest_time} to {latest_time}\n"
-            f"• Total Packets Scanned: {total_packets}\n"
-            f"• Critical JNDI Indicators: {jndi_count}\n"
-            f"• Obfuscated JNDI Indicators: {obfuscated_jndi_count}\n"
-            f"• Suspicious User-Agents: {suspicious_ua_count}\n"
-            f"• Potential Callbacks: {callback_count}\n"
+            f"Capture Window: {earliest_time} to {latest_time}\n"
+            f"Total Packets Scanned: {total_packets}\n"
+            f"Critical JNDI Indicators: {jndi_count}\n"
+            f"Obfuscated JNDI Indicators: {obfuscated_jndi_count}\n"
+            f"Suspicious User-Agents: {suspicious_ua_count}\n"
+            f"Potential Callbacks: {callback_count}\n"
             f"===========================================\n"
         )
 
@@ -239,6 +621,7 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
     except subprocess.TimeoutExpired:
         return f"PCAP_TIMEOUT_ERROR: TShark timed out processing {pcap_filename}."
     except Exception as e:
+        telemetry.errors.append(f"PCAP analysis failed for {pcap_filename}: {e}")
         return f"PCAP_EXECUTION_ERROR on {pcap_filename}: {str(e)}"
 
 
@@ -247,7 +630,7 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
 # ==========================================
 
 def run_agent_1_splunk() -> str:
-    print("\n=== [AGENT 1: SPLUNK LOG COLLECTOR] ===")
+    log.info("=== [AGENT 1: SPLUNK LOG COLLECTOR] ===")
 
     agent1_path = os.path.join(AGENTS_DIR, "agent1_siem.md")
     system_prompt = load_section(agent1_path, "system_prompt")
@@ -258,7 +641,9 @@ def run_agent_1_splunk() -> str:
             "type": "function",
             "function": {
                 "name": "query_splunk",
-                "description": load_section(agent1_path, "tool_query_splunk").replace("Description: ", ""),
+                "description": load_section(agent1_path, "tool_query_splunk").replace(
+                    "Description: ", ""
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {"search_query": {"type": "string"}},
@@ -273,29 +658,34 @@ def run_agent_1_splunk() -> str:
         {"role": "user", "content": user_message},
     ]
 
-    response = ollama.chat(
-        model=CONFIG["LLM_MODEL"], messages=messages, tools=tools_schema
-    )
-    msg = response["message"]
+    try:
+        response = ollama.chat(
+            model=CONFIG["LLM_MODEL"], messages=messages, tools=tools_schema
+        )
+        msg = response["message"]
 
-    if msg.get("tool_calls"):
-        for call in msg["tool_calls"]:
-            args = call["function"]["arguments"]
-            raw_tool_output = tool_query_splunk(**args)
+        if msg.get("tool_calls"):
+            for call in msg["tool_calls"]:
+                args = call["function"]["arguments"]
+                raw_tool_output = tool_query_splunk(**args)
 
-            messages.append(msg)
-            messages.append({"role": "tool", "content": raw_tool_output})
+                messages.append(msg)
+                messages.append({"role": "tool", "content": raw_tool_output})
 
-            second_response = ollama.chat(
-                model=CONFIG["LLM_MODEL"], messages=messages
-            )
-            return second_response["message"]["content"]
+                second_response = retry_request_ollama(
+                    model=CONFIG["LLM_MODEL"], messages=messages
+                )
+                return second_response["message"]["content"]
 
-    return "No Splunk queries were triggered by Agent 1."
+        return "No Splunk queries were triggered by Agent 1."
+    except Exception as e:
+        telemetry.errors.append(f"Agent 1 (Splunk) failed: {e}")
+        log.error("Agent 1 failed: %s", e)
+        return f"AGENT_ERROR: Splunk analysis unavailable — {e}"
 
 
 def run_agent_2_pcap() -> str:
-    print("\n=== [AGENT 2: PCAP DISSECTION ANALYST] ===")
+    log.info("=== [AGENT 2: PCAP DISSECTION ANALYST] ===")
 
     combined_pcap_data = []
     for pcap in CONFIG["REQUIRED_PCAPS"]:
@@ -309,16 +699,20 @@ def run_agent_2_pcap() -> str:
     )
     prompt = prompt_template.replace("{{PCAP_DATA}}", pcap_text)
 
-    response = ollama.chat(
-        model=CONFIG["LLM_MODEL"],
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = ollama.chat(
+            model=CONFIG["LLM_MODEL"],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response["message"]["content"]
+    except Exception as e:
+        telemetry.errors.append(f"Agent 2 (PCAP) failed: {e}")
+        log.error("Agent 2 failed: %s", e)
+        return f"AGENT_ERROR: PCAP analysis unavailable — {e}"
 
-    return response["message"]["content"]
 
-
-def run_agent_3_synthesis(splunk_findings: str, pcap_findings: str) -> str:
-    print("\n=== [AGENT 3: IR REPORT SYNTHESIZER] ===")
+def run_agent_3_synthesis(splunk_findings: str, pcap_findings: str, vuln_findings: str = "") -> str:
+    log.info("=== [AGENT 3: IR REPORT SYNTHESIZER] ===")
 
     system_prompt = load_section(
         os.path.join(AGENTS_DIR, "agent3_synthesis.md"), "system_prompt"
@@ -327,19 +721,112 @@ def run_agent_3_synthesis(splunk_findings: str, pcap_findings: str) -> str:
         os.path.join(AGENTS_DIR, "agent3_synthesis.md"), "user_content_template"
     )
 
+    investigator_name = os.environ.get("INVESTIGATOR_NAME", "Lead Incident Response Agent")
+    current_date = datetime.datetime.now().strftime("%B %d, %Y")
+
     user_content = (
         user_content_template.replace("{{SPLUNK_FINDINGS}}", splunk_findings)
         .replace("{{PCAP_FINDINGS}}", pcap_findings)
+        .replace("{{VULN_FINDINGS}}", vuln_findings)
     )
 
-    response = ollama.chat(
-        model=CONFIG["LLM_MODEL"],
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
+    full_prompt = (
+        f"Investigator: {investigator_name}\n"
+        f"Date: {current_date}\n\n"
+        f"{user_content}"
     )
-    return response["message"]["content"]
+
+    try:
+        response = ollama.chat(
+            model=CONFIG["LLM_MODEL"],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": full_prompt},
+            ],
+        )
+        return response["message"]["content"]
+    except Exception as e:
+        telemetry.errors.append(f"Agent 3 (Synthesis) failed: {e}")
+        log.error("Agent 3 failed: %s", e)
+        return f"AGENT_ERROR: Report synthesis unavailable — {e}"
+
+
+def run_agent_4_vuln_scan() -> str:
+    log.info("=== [AGENT 4: VULNERABILITY SCANNER] ===")
+
+    if not CONFIG["SCAN_TARGET"]:
+        log.warning("No SCAN_TARGET configured — skipping vulnerability scan.")
+        return "VULN_SKIP: No SCAN_TARGET configured (set SCAN_TARGET env var)."
+
+    agent4_path = os.path.join(AGENTS_DIR, "agent4_vuln_scan.md")
+    system_prompt = load_section(agent4_path, "system_prompt")
+
+    try:
+        syft_output = tool_syft_sbom()
+        if syft_output.startswith("VULN_ERROR") or syft_output.startswith("VULN_SKIP"):
+            return syft_output
+
+        grype_output = tool_grype_scan()
+        if grype_output.startswith("VULN_ERROR") or grype_output.startswith("VULN_SKIP"):
+            return grype_output
+
+        summary = summarize_vuln_scan(grype_output, syft_output)
+        log.info("Vulnerability summary generated:\n%s", summary)
+
+        tools_schema = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "scan_vulnerabilities",
+                    "description": load_section(agent4_path, "tool_scan_vulnerabilities").replace(
+                        "Description: ", ""
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    },
+                },
+            }
+        ]
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": load_section(agent4_path, "user_message")},
+        ]
+
+        response = ollama.chat(
+            model=CONFIG["LLM_MODEL"], messages=messages, tools=tools_schema
+        )
+        msg = response["message"]
+
+        if msg.get("tool_calls"):
+            messages.append(msg)
+            messages.append({"role": "tool", "content": summary})
+            second_response = retry_request_ollama(
+                model=CONFIG["LLM_MODEL"], messages=messages
+            )
+            return second_response["message"]["content"]
+
+        return summary
+
+    except Exception as e:
+        telemetry.errors.append(f"Agent 4 (Vulnerability scan) failed: {e}")
+        log.error("Agent 4 failed: %s", e)
+        return f"AGENT_ERROR: Vulnerability scan unavailable — {e}"
+
+
+def retry_request_ollama(**kwargs) -> dict:
+    max_retries = CONFIG["HTTP_RETRIES"]
+    delay = CONFIG["HTTP_RETRY_DELAY"]
+    for attempt in range(1, max_retries + 1):
+        try:
+            return ollama.chat(**kwargs)
+        except Exception as e:
+            log.warning("Ollama call failed (attempt %d/%d): %s", attempt, max_retries, e)
+            if attempt < max_retries:
+                time.sleep(delay * (2 ** (attempt - 1)))
+    raise RuntimeError(f"Ollama call failed after {max_retries} retries")
 
 
 # ==========================================
@@ -347,27 +834,71 @@ def run_agent_3_synthesis(splunk_findings: str, pcap_findings: str) -> str:
 # ==========================================
 
 def main():
-    print("[PIPELINE INITIALIZED] Launching 3-Agent Threat Hunt...")
+    log.info("[PIPELINE INITIALIZED] Launching 4-Agent Threat Hunt...")
 
     ollama_host = CONFIG["OLLAMA_HOST"]
     os.environ["OLLAMA_HOST"] = ollama_host
 
-    splunk_results = run_agent_1_splunk()
-    pcap_results = run_agent_2_pcap()
-    final_report = run_agent_3_synthesis(splunk_results, pcap_results)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        future_splunk = executor.submit(run_agent_1_splunk)
+        future_pcap = executor.submit(run_agent_2_pcap)
+        future_vuln = executor.submit(run_agent_4_vuln_scan)
 
-    print("\n============================================================")
-    print("                FINAL PLAYBOOK INCIDENT REPORT              ")
-    print("============================================================")
-    print(final_report)
+        t0 = time.time()
+        splunk_results = future_splunk.result()
+        telemetry.agent_durations["Agent 1 (Splunk)"] = time.time() - t0
 
-    OUTPUT_DIR = os.environ.get("OUTPUT_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "output"))
+        t0 = time.time()
+        pcap_results = future_pcap.result()
+        telemetry.agent_durations["Agent 2 (PCAP)"] = time.time() - t0
+
+        t0 = time.time()
+        vuln_results = future_vuln.result()
+        telemetry.agent_durations["Agent 4 (Vulnerability)"] = time.time() - t0
+
+    t0 = time.time()
+    final_report = run_agent_3_synthesis(splunk_results, pcap_results, vuln_results)
+    telemetry.agent_durations["Agent 3 (Synthesis)"] = time.time() - t0
+
+    log.info("\n" + "=" * 60)
+    log.info("          FINAL PLAYBOOK INCIDENT REPORT")
+    log.info("=" * 60)
+    log.info("\n%s", final_report)
+
+    OUTPUT_DIR = os.environ.get(
+        "OUTPUT_DIR",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "output"),
+    )
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
     report_path = os.path.join(OUTPUT_DIR, f"incident_report_{timestamp}.md")
     with open(report_path, "w") as f:
         f.write(final_report)
-    print(f"\n[OUTPUT] Report saved to {report_path}")
+    log.info("Report saved to %s", report_path)
+
+    json_path = os.path.join(OUTPUT_DIR, f"incident_report_{timestamp}.json")
+    structured = {
+        "timestamp": timestamp,
+        "investigator": os.environ.get("INVESTIGATOR_NAME", "Lead Incident Response Agent"),
+        "splunk_findings": splunk_results,
+        "pcap_findings": pcap_results,
+        "vuln_findings": vuln_results,
+        "report": final_report,
+        "telemetry": {
+            "agent_durations": telemetry.agent_durations,
+            "splunk_results_count": telemetry.splunk_results_count,
+            "pcap_packets_processed": telemetry.pcap_packets_processed,
+            "pcap_packets_flagged": telemetry.pcap_packets_flagged,
+            "vuln_packages_found": telemetry.vuln_packages_found,
+            "vuln_cves_found": telemetry.vuln_cves_found,
+        },
+    }
+    with open(json_path, "w") as f:
+        json.dump(structured, f, indent=2)
+    log.info("JSON report saved to %s", json_path)
+
+    log.info("\n" + telemetry.summary())
 
 
 if __name__ == "__main__":

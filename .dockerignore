@@ -1,0 +1,10 @@
+output/
+.git/
+*.md
+__pycache__/
+*.pyc
+.DS_Store
+tests/
+.github/
+.cache/
+.pytest_cache/
