@@ -22,6 +22,15 @@ Review the following PCAP dissection data and produce a structured analysis addr
 - Categorize IPs: INTERNAL (RFC1918) vs EXTERNAL
 - Label external IPs receiving JNDI probes as **Attacker Infrastructure / C2**
 - Label internal hosts initiating outbound LDAP as **Potentially Compromised**
+- Flag any traffic involving these known malicious IPs:
+  - `49.7.224.217`
+  - `104.248.144.120`
+  - `46.105.95.220`
+  - `5.157.38.50`
+  - `2.57.121.36`
+  - `191.71.247.91`
+  - `175.6.210.66`
+  - `195.54.160.149`
 
 IMPORTANT: Explicitly highlight all distinct dates and timestamp ranges observed across all PCAP files.
 
