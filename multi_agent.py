@@ -33,6 +33,15 @@ log = logging.getLogger(__name__)
 
 _splunk_pass = os.environ.get("SPLUNK_PASS")
 if not _splunk_pass:
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(_env_path):
+        with open(_env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("SPLUNK_PASS="):
+                    _splunk_pass = line.split("=", 1)[1].strip("\"'")
+                    break
+if not _splunk_pass:
     sys.exit("FATAL: SPLUNK_PASS environment variable is required.")
 
 CONFIG = {
@@ -151,6 +160,17 @@ IOC_FEED_URLS = [
     "https://gist.github.com/gnremy/c546c7911d5f876f263309d7161a7217/raw",
     "https://raw.githubusercontent.com/CriticalPathSecurity/Zeek-Intelligence-Feeds/master/log4j_ip.intel",
 ]
+
+KNOWN_MALICIOUS_IPS = {
+    "49.7.224.217",
+    "104.248.144.120",
+    "46.105.95.220",
+    "5.157.38.50",
+    "2.57.121.36",
+    "191.71.247.91",
+    "175.6.210.66",
+    "195.54.160.149",
+}
 
 _ioc_cache = None  # type: set[str] | None
 
@@ -346,7 +366,7 @@ def tool_query_splunk(search_query: str) -> str:
             log.info("0 results from Splunk; executing fallback JNDI/LDAP search")
             fallback_spl = CONFIG.get(
                 "FALLBACK_SPL",
-                'search index=* ("jndi" OR "${" OR "ldap" OR "rmi" OR "lower:" OR "upper:" OR "env:" OR "::-j" OR "jndi" OR "log4j") '
+                'search index=* (source="*pcap*") ("jndi" OR "ldap" OR "rmi" OR "lower:" OR "upper:" OR "env:" OR "log4j") '
                 '| eval obfuscated=if(match(_raw,"\\\\$\\\\{.*:.*ndi"),"YES","NO") '
                 '| stats count min(_time) as earliest max(_time) as latest by _time, src_ip, dest_ip, obfuscated, _raw',
             )
@@ -367,6 +387,74 @@ def tool_query_splunk(search_query: str) -> str:
             )
             if res.status_code == 200:
                 data = res.json().get("results", [])
+
+        if not data:
+            log.info("0 results from Splunk; executing known malicious IP search")
+            ip_conditions = " OR ".join(f'"{ip}"' for ip in KNOWN_MALICIOUS_IPS)
+            ip_spl = f'search index=* (source="*pcap*") ({ip_conditions})'
+            res = retry_request(
+                "POST", url,
+                auth=(CONFIG["SPLUNK_USER"], CONFIG["SPLUNK_PASS"]),
+                data={
+                    "search": ip_spl,
+                    "exec_mode": "oneshot",
+                    "output_mode": "json",
+                    "earliest_time": "0",
+                    "latest_time": "now",
+                },
+                verify=CONFIG["SPLUNK_VERIFY_SSL"],
+                timeout=30,
+            )
+            if res.status_code == 200:
+                data = res.json().get("results", [])
+
+        if not data:
+            log.info("0 results from Splunk; executing known malicious IP search")
+            ip_conditions = " OR ".join(f'"{ip}"' for ip in KNOWN_MALICIOUS_IPS)
+            ip_spl = f'search index=* (source="*pcap*") ({ip_conditions})'
+            res = retry_request(
+                "POST", url,
+                auth=(CONFIG["SPLUNK_USER"], CONFIG["SPLUNK_PASS"]),
+                data={
+                    "search": ip_spl,
+                    "exec_mode": "oneshot",
+                    "output_mode": "json",
+                    "earliest_time": "0",
+                    "latest_time": "now",
+                },
+                verify=CONFIG["SPLUNK_VERIFY_SSL"],
+                timeout=30,
+            )
+            if res.status_code == 200:
+                data = res.json().get("results", [])
+
+        if not data:
+            log.info("0 results from Splunk; executing comprehensive JNDI fallbacks")
+            jndi_fallbacks = [
+                'search index=* (source="*pcap*") ip contains "jndi"',
+                'search index=* (source="*pcap*") frame matches "(?i)jndi"',
+                'search index=* (source="*pcap*") (ip contains "jndi" OR http.user_agent contains "jndi")',
+                'search index=* (source="*pcap*") (frame matches "(?i)jndi" OR frame matches "\\$\\{" OR ldap OR tcp.port == 1389 OR tcp.port == 1099)',
+            ]
+            for fb in jndi_fallbacks:
+                res = retry_request(
+                    "POST", url,
+                    auth=(CONFIG["SPLUNK_USER"], CONFIG["SPLUNK_PASS"]),
+                    data={
+                        "search": fb,
+                        "exec_mode": "oneshot",
+                        "output_mode": "json",
+                        "earliest_time": "0",
+                        "latest_time": "now",
+                    },
+                    verify=CONFIG["SPLUNK_VERIFY_SSL"],
+                    timeout=30,
+                )
+                if res.status_code == 200:
+                    data = res.json().get("results", [])
+                if data:
+                    log.info("Fallback query returned %d results: %s", len(data), fb[:80])
+                    break
 
         if not data:
             telemetry.splunk_results_count = 0
@@ -433,6 +521,7 @@ def _parse_tshark_field_output(output: str) -> list[dict]:
                     ),
                     "tcp.dstport": _get_json_field(pkt, "tcp", "tcp.dstport"),
                     "text": _get_json_field(pkt, "text", "text"),
+                    "data": _get_json_field(pkt, "data", "data"),
                     "dns.qry.name": _get_json_field(pkt, "dns", "dns.qry.name"),
                     "dns.flags.response": _get_json_field(
                         pkt, "dns", "dns.flags.response"
@@ -451,35 +540,63 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
 
     log.info("Analyzing PCAP: %s", pcap_filename)
     try:
-        all_cmd = [
-            "tshark",
-            "-r", target_path, "-n",
-            "-T", "json",
-            "-e", "frame.number",
-            "-e", "frame.time",
-            "-e", "ip.src",
-            "-e", "ip.dst",
-            "-e", "_ws.col.Protocol",
-            "-e", "http.request.method",
-            "-e", "http.request.uri",
-            "-e", "http.user_agent",
-            "-e", "http.file_data",
-            "-e", "tcp.dstport",
-            "-e", "text",
+        ws_filters = [
+            'frame matches "(?i)jndi"',
+            'ip contains "jndi"',
+            'ip contains "jndi" || http.user_agent contains "jndi"',
+            'frame matches "(?i)jndi" || frame matches "\\$\\{" || ldap || tcp.port == 1389 || tcp.port == 1099',
         ]
-        res = subprocess.run(all_cmd, capture_output=True, text=True, timeout=30)
-        if res.returncode != 0:
-            return f"PCAP_ERROR: TShark error: {res.stderr}"
+        packets = []
+        for wsf in ws_filters:
+            log.info("Trying Wireshark filter: %s", wsf)
+            filter_cmd = [
+                "tshark", "-r", target_path, "-n",
+                "-Y", wsf,
+                "-T", "json",
+                "-e", "frame.number",
+                "-e", "frame.time",
+                "-e", "ip.src",
+                "-e", "ip.dst",
+                "-e", "_ws.col.Protocol",
+                "-e", "http.request.method",
+                "-e", "http.request.uri",
+                "-e", "http.user_agent",
+                "-e", "http.file_data",
+                "-e", "tcp.dstport",
+                "-e", "text",
+            ]
+            res = subprocess.run(filter_cmd, capture_output=True, text=True, timeout=30)
+            if res.returncode == 0:
+                packets = _parse_tshark_field_output(res.stdout.strip())
+                if packets:
+                    log.info("Wireshark filter matched %d packets", len(packets))
+                    break
 
-        packets = _parse_tshark_field_output(res.stdout.strip())
-        max_packets = CONFIG["MAX_PCAP_PACKETS"]
-        if len(packets) > max_packets:
-            log.warning(
-                "Truncating PCAP analysis to %d packets (of %d)",
-                max_packets,
-                len(packets),
-            )
-            packets = packets[:max_packets]
+        if not packets:
+            all_cmd = [
+                "tshark",
+                "-r", target_path, "-n",
+                "-T", "json",
+                "-e", "frame.number",
+                "-e", "frame.time",
+                "-e", "ip.src",
+                "-e", "ip.dst",
+                "-e", "_ws.col.Protocol",
+                "-e", "http.request.method",
+                "-e", "http.request.uri",
+                "-e", "http.user_agent",
+                "-e", "http.file_data",
+                "-e", "tcp.dstport",
+                "-e", "text",
+            ]
+            res = subprocess.run(all_cmd, capture_output=True, text=True, timeout=30)
+            if res.returncode != 0:
+                return f"PCAP_ERROR: TShark error: {res.stderr}"
+            packets = _parse_tshark_field_output(res.stdout.strip())
+            max_packets = CONFIG["MAX_PCAP_PACKETS"]
+            if len(packets) > max_packets:
+                log.warning("Truncating to %d packets (of %d)", max_packets, len(packets))
+                packets = packets[:max_packets]
 
         if not packets:
             return f"PCAP_SUCCESS: '{pcap_filename}' parsed, 0 usable IP frames."
@@ -501,6 +618,7 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
         obfuscated_jndi_count = 0
         suspicious_ua_count = 0
         callback_count = 0
+        known_malicious_ip_count = 0
         dns_queries = []
 
         for pkt in packets:
@@ -515,8 +633,9 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
             body = pkt.get("http.file_data", "")
             dstport = pkt.get("tcp.dstport", "")
             raw_text = pkt.get("text", "")
+            raw_data = pkt.get("data", "")
 
-            combined_payload = f"{uri} {ua} {body} {raw_text}".lower()
+            combined_payload = f"{uri} {ua} {body} {raw_text} {raw_data}".lower()
             normalized_payload = normalize_jndi_payload(combined_payload)
 
             contains_jndi = "jndi:" in combined_payload or "${" in combined_payload
@@ -531,6 +650,7 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
                 any(sua in ua.lower() for sua in suspicious_uas) if ua else False
             )
             is_callback = bool(method and dstport == "80" and not uri.startswith("/"))
+            is_known_malicious = (src in KNOWN_MALICIOUS_IPS or dst in KNOWN_MALICIOUS_IPS)
 
             if (
                 contains_jndi
@@ -539,6 +659,7 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
                 or has_suspicious_ua
                 or is_callback
                 or method
+                or is_known_malicious
             ):
                 entry = f"Frame {frame_num}: {frame_time} | {src} -> {dst} | {proto}"
                 if method or uri:
@@ -562,6 +683,9 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
                 if is_callback:
                     entry += " | *** ALERT: Potential C2 Callback ***"
                     callback_count += 1
+                if is_known_malicious:
+                    entry += " | *** ALERT: Known Malicious IP ***"
+                    known_malicious_ip_count += 1
 
                 summaries.append(entry)
 
@@ -613,6 +737,7 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
             f"Obfuscated JNDI Indicators: {obfuscated_jndi_count}\n"
             f"Suspicious User-Agents: {suspicious_ua_count}\n"
             f"Potential Callbacks: {callback_count}\n"
+            f"Known Malicious IP Matches: {known_malicious_ip_count}\n"
             f"===========================================\n"
         )
 
