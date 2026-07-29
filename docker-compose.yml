@@ -25,6 +25,7 @@ services:
       - OLLAMA_HOST=http://host.docker.internal:11434
       - PCAP_DIRECTORY=/workspace/pcap
       - AGENTS_DIR=/workspace/agents
+      - OUTPUT_DIR=/workspace/output
     volumes:
       - ./pcap:/workspace/pcap
       - ./output:/workspace/output

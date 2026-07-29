@@ -135,7 +135,7 @@ def test_tool_query_splunk_success():
         },
         status=200,
     )
-    result = tool_query_splunk('search index=* "jndi"')
+    result = tool_query_splunk(search_query='search index=* "jndi"')
     assert "TIME RANGE" in result
     assert "log entry 1" in result
     assert "log entry 2" in result
@@ -149,7 +149,7 @@ def test_tool_query_splunk_empty():
         json={"results": []},
         status=200,
     )
-    result = tool_query_splunk('search index=* "jndi"')
+    result = tool_query_splunk(search_query='search index=* "jndi"')
     assert "0 events found" in result
 
 
@@ -166,7 +166,7 @@ def test_tool_query_splunk_with_pdf_fixture():
         json={"results": pdf_data[:5]},
         status=200,
     )
-    result = tool_query_splunk('search index=* "jndi"')
+    result = tool_query_splunk(search_query='search index=* "jndi"')
     assert "TIME RANGE" in result
     assert "195.54.160.149" in result
     assert "Jul" in result or "2026" in result
@@ -185,7 +185,7 @@ def test_tool_query_splunk_pdf_full_timeline():
         json={"results": pdf_data},
         status=200,
     )
-    result = tool_query_splunk('search index=* "jndi" | stats count by src_ip')
+    result = tool_query_splunk(search_query='search index=* "jndi" | stats count by src_ip')
     assert "TIME RANGE" in result
     assert "2026-07-24" in result or "Jul 24" in result or "07-24" in result
 
@@ -198,7 +198,7 @@ def test_tool_query_splunk_no_timestamps():
         json={"results": [{"_raw": "no time field"}]},
         status=200,
     )
-    result = tool_query_splunk('search index=* "jndi"')
+    result = tool_query_splunk(search_query='search index=* "jndi"')
     assert "none contain _time" in result
 
 
@@ -209,7 +209,7 @@ def test_tool_query_splunk_error():
         f"{CONFIG['SPLUNK_HOST']}/services/search/jobs",
         status=500,
     )
-    result = tool_query_splunk("search test")
+    result = tool_query_splunk(search_query="search test")
     assert "SPLUNK_ERROR" in result
 
 

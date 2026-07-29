@@ -69,7 +69,7 @@ CONFIG = {
     "MAX_PCAP_PACKETS": int(os.environ.get("MAX_PCAP_PACKETS", "50000")),
     "HTTP_RETRIES": int(os.environ.get("HTTP_RETRIES", "3")),
     "HTTP_RETRY_DELAY": int(os.environ.get("HTTP_RETRY_DELAY", "2")),
-    "SCAN_TARGET": os.environ.get("SCAN_TARGET", "splunk/splunk:latest"),
+    "SCAN_TARGET": os.environ.get("SCAN_TARGET", ""),
     "MAX_TOOL_ROUNDS": int(os.environ.get("MAX_TOOL_ROUNDS", "3")),
 }
 
@@ -370,7 +370,10 @@ def summarize_vuln_scan(grype_json: str, syft_json: str) -> str:
 # TOOL DEFINITIONS
 # ==========================================
 
-def tool_query_splunk(search_query: str) -> str:
+def tool_query_splunk(**kwargs) -> str:
+    search_query = kwargs.get("search_query") or next(iter(kwargs.values()), None)
+    if not search_query or not isinstance(search_query, str):
+        return f"AGENT_ERROR: invalid arguments — {kwargs}"
     log.info("Splunk query: %s", search_query)
 
     clean_query = search_query.strip()
