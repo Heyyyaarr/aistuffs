@@ -664,7 +664,16 @@ def test_validate_report_empty():
 
 
 def test_validate_report_partial_section_numbers():
-    report = "§1\n§2\n§3\n§4\n§5\n§6\n§7\n§8"
+    report = (
+        "§1 — Timeline\n"
+        "§2 — Affected Systems\n"
+        "§3 — Exploitation Detection — Log Analysis\n"
+        "§4 — Exploitation Detection — Network Analysis\n"
+        "§5 — Exploitation Detection — Endpoint Analysis\n"
+        "§6 — IP Categorization\n"
+        "§7 — Preventative Recommendations\n"
+        "§8 — Additional Resources\n"
+    )
     missing = ma.validate_report_structure(report)
     assert missing == []
 
