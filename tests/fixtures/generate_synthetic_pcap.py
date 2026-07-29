@@ -1,5 +1,5 @@
-import struct
 import os
+import struct
 
 
 def _ip_checksum(header: bytes) -> int:
