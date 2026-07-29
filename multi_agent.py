@@ -109,14 +109,14 @@ class PipelineTelemetry:
 telemetry = PipelineTelemetry()
 
 REQUIRED_REPORT_SECTIONS = [
-    (r"§\s*1", "§1 — Timeline"),
-    (r"§\s*2", "§2 — Affected Systems"),
-    (r"§\s*3", "§3 — Exploitation Detection — Log Analysis"),
-    (r"§\s*4", "§4 — Exploitation Detection — Network Analysis"),
-    (r"§\s*5", "§5 — Exploitation Detection — Endpoint Analysis"),
-    (r"§\s*6", "§6 — IP Categorization"),
-    (r"§\s*7", "§7 — Preventative Recommendations"),
-    (r"§\s*8", "§8 — Additional Resources"),
+    (r"§\s*1.*Timeline", "§1 — Timeline"),
+    (r"§\s*2.*Affected Systems", "§2 — Affected Systems"),
+    (r"§\s*3.*Exploitation Detection.*Log Analysis", "§3 — Exploitation Detection — Log Analysis"),
+    (r"§\s*4.*Exploitation Detection.*Network Analysis", "§4 — Exploitation Detection — Network Analysis"),
+    (r"§\s*5.*Exploitation Detection.*Endpoint Analysis", "§5 — Exploitation Detection — Endpoint Analysis"),
+    (r"§\s*6.*IP Categorization", "§6 — IP Categorization"),
+    (r"§\s*7.*Preventative Recommendations", "§7 — Preventative Recommendations"),
+    (r"§\s*8.*Additional Resources", "§8 — Additional Resources"),
 ]
 
 
