@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint with ruff
+        run: ruff check --output-format=github .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install .[dev]
+      - name: Run tests
+        run: python3 -m pytest tests/ -v --tb=short
+        env:
+          SPLUNK_PASS: test
+          SPLUNK_HOST: https://splunk-test:8089
+          OLLAMA_HOST: http://ollama-test:11434
+          PCAP_DIRECTORY: /tmp
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t multi-agent-hunt .
