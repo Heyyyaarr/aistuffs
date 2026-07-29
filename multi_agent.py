@@ -61,7 +61,7 @@ CONFIG = {
     "MAX_PCAP_PACKETS": int(os.environ.get("MAX_PCAP_PACKETS", "50000")),
     "HTTP_RETRIES": int(os.environ.get("HTTP_RETRIES", "3")),
     "HTTP_RETRY_DELAY": int(os.environ.get("HTTP_RETRY_DELAY", "2")),
-    "SCAN_TARGET": os.environ.get("SCAN_TARGET", ""),
+    "SCAN_TARGET": os.environ.get("SCAN_TARGET", "splunk/splunk:latest"),
 }
 
 AGENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents")
@@ -167,9 +167,12 @@ KNOWN_MALICIOUS_IPS = {
     "46.105.95.220",
     "5.157.38.50",
     "2.57.121.36",
-    "191.71.247.91",
+    "198.71.247.91",
     "175.6.210.66",
     "195.54.160.149",
+    "191.232.38.25",
+    "107.189.1.178",
+    "147.182.202.30",
 }
 
 _ioc_cache = None  # type: set[str] | None
@@ -222,7 +225,7 @@ def tool_syft_sbom(scan_target: str = None) -> str:
     try:
         res = subprocess.run(
             ["syft", target, "-o", "json"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=300,
         )
         if res.returncode != 0:
             return f"VULN_ERROR: Syft failed: {res.stderr[:500]}"
@@ -480,6 +483,11 @@ def tool_query_splunk(search_query: str) -> str:
 def _get_json_field(pkt: dict, *keys: str) -> str:
     try:
         layers = pkt.get("_source", {}).get("layers", {})
+        if keys[-1] in layers:
+            val = layers[keys[-1]]
+            if isinstance(val, list) and val:
+                return str(val[0])
+            return str(val) if val else ""
         val = layers
         for key in keys:
             if isinstance(val, dict):
@@ -518,6 +526,9 @@ def _parse_tshark_field_output(output: str) -> list[dict]:
                     ),
                     "http.file_data": _get_json_field(
                         pkt, "http", "http.file_data"
+                    ),
+                    "http.authorization": _get_json_field(
+                        pkt, "http", "http.authorization"
                     ),
                     "tcp.dstport": _get_json_field(pkt, "tcp", "tcp.dstport"),
                     "text": _get_json_field(pkt, "text", "text"),
@@ -631,11 +642,12 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
             uri = pkt.get("http.request.uri", "")
             ua = pkt.get("http.user_agent", "")
             body = pkt.get("http.file_data", "")
+            auth = pkt.get("http.authorization", "")
             dstport = pkt.get("tcp.dstport", "")
             raw_text = pkt.get("text", "")
             raw_data = pkt.get("data", "")
 
-            combined_payload = f"{uri} {ua} {body} {raw_text} {raw_data}".lower()
+            combined_payload = f"{uri} {ua} {body} {auth} {raw_text} {raw_data}".lower()
             normalized_payload = normalize_jndi_payload(combined_payload)
 
             contains_jndi = "jndi:" in combined_payload or "${" in combined_payload
@@ -668,6 +680,8 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
                     entry += f" | UA: {ua}"
                 if body:
                     entry += f" | Body: {body[:120]}"
+                if auth:
+                    entry += f" | Auth: {auth[:120]}"
 
                 if contains_jndi:
                     entry += " | *** CRITICAL: Log4j JNDI Exploit String ***"
