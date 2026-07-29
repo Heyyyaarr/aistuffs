@@ -370,7 +370,7 @@ def summarize_vuln_scan(grype_json: str, syft_json: str) -> str:
 # TOOL DEFINITIONS
 # ==========================================
 
-def tool_query_splunk(search_query: str) -> str:
+def tool_query_splunk(search_query: str = "") -> str:
     log.info("Splunk query: %s", search_query)
 
     clean_query = search_query.strip()
@@ -752,6 +752,17 @@ class ToolAgent(AgentBase):
     tool_fn = None
     tool_parameters: dict = None
 
+    def _call_tool(self, call: dict) -> str:
+        args = call.get("function", {}).get("arguments")
+        fn = self.__class__.tool_fn
+        if isinstance(args, dict):
+            return fn(search_query=args.get("search_query", ""))
+        elif isinstance(args, str):
+            return fn(search_query=args)
+        elif isinstance(args, (list, tuple)):
+            return fn(search_query=str(args[0]) if args else "")
+        return fn(search_query=str(args))
+
     def _tool_schema(self) -> list[dict]:
         params = self.tool_parameters or {
             "type": "object",
@@ -784,15 +795,11 @@ class ToolAgent(AgentBase):
                 if not msg.get("tool_calls"):
                     return msg.get("content", f"No {self.tool_name} calls triggered.")
                 for call in msg["tool_calls"]:
-                    args = call["function"]["arguments"]
-                    if isinstance(args, dict):
-                        raw_output = self.tool_fn(search_query=args.get("search_query", ""))
-                    elif isinstance(args, str):
-                        raw_output = self.tool_fn(search_query=args)
-                    elif isinstance(args, (list, tuple)) and args:
-                        raw_output = self.tool_fn(search_query=str(args[0]))
-                    else:
-                        raw_output = f"AGENT_ERROR: unhandled args format: {type(args).__name__} = {args}"
+                    try:
+                        raw_output = self._call_tool(call)
+                    except Exception as e:
+                        log.error("Tool call failed: %s — args=%s", e, call.get("function", {}).get("arguments"))
+                        raw_output = f"AGENT_ERROR: tool call failed — {e}"
                     messages.append(msg)
                     messages.append({"role": "tool", "content": raw_output})
             log.info("Max tool rounds (%d) reached.", max_rounds)
