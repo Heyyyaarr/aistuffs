@@ -62,6 +62,7 @@ CONFIG = {
     "HTTP_RETRIES": int(os.environ.get("HTTP_RETRIES", "3")),
     "HTTP_RETRY_DELAY": int(os.environ.get("HTTP_RETRY_DELAY", "2")),
     "SCAN_TARGET": os.environ.get("SCAN_TARGET", "splunk/splunk:latest"),
+    "MAX_TOOL_ROUNDS": int(os.environ.get("MAX_TOOL_ROUNDS", "3")),
 }
 
 AGENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents")
@@ -366,102 +367,8 @@ def tool_query_splunk(search_query: str) -> str:
         data = res.json().get("results", []) if res.status_code == 200 else []
 
         if not data:
-            log.info("0 results from Splunk; executing fallback JNDI/LDAP search")
-            fallback_spl = CONFIG.get(
-                "FALLBACK_SPL",
-                'search index=* (source="*pcap*") ("jndi" OR "ldap" OR "rmi" OR "lower:" OR "upper:" OR "env:" OR "log4j") '
-                '| eval obfuscated=if(match(_raw,"\\\\$\\\\{.*:.*ndi"),"YES","NO") '
-                '| stats count min(_time) as earliest max(_time) as latest by _time, src_ip, dest_ip, obfuscated, _raw',
-            )
-
-            res = retry_request(
-                "POST",
-                url,
-                auth=(CONFIG["SPLUNK_USER"], CONFIG["SPLUNK_PASS"]),
-                data={
-                    "search": fallback_spl,
-                    "exec_mode": "oneshot",
-                    "output_mode": "json",
-                    "earliest_time": "0",
-                    "latest_time": "now",
-                },
-                verify=CONFIG["SPLUNK_VERIFY_SSL"],
-                timeout=30,
-            )
-            if res.status_code == 200:
-                data = res.json().get("results", [])
-
-        if not data:
-            log.info("0 results from Splunk; executing known malicious IP search")
-            ip_conditions = " OR ".join(f'"{ip}"' for ip in KNOWN_MALICIOUS_IPS)
-            ip_spl = f'search index=* (source="*pcap*") ({ip_conditions})'
-            res = retry_request(
-                "POST", url,
-                auth=(CONFIG["SPLUNK_USER"], CONFIG["SPLUNK_PASS"]),
-                data={
-                    "search": ip_spl,
-                    "exec_mode": "oneshot",
-                    "output_mode": "json",
-                    "earliest_time": "0",
-                    "latest_time": "now",
-                },
-                verify=CONFIG["SPLUNK_VERIFY_SSL"],
-                timeout=30,
-            )
-            if res.status_code == 200:
-                data = res.json().get("results", [])
-
-        if not data:
-            log.info("0 results from Splunk; executing known malicious IP search")
-            ip_conditions = " OR ".join(f'"{ip}"' for ip in KNOWN_MALICIOUS_IPS)
-            ip_spl = f'search index=* (source="*pcap*") ({ip_conditions})'
-            res = retry_request(
-                "POST", url,
-                auth=(CONFIG["SPLUNK_USER"], CONFIG["SPLUNK_PASS"]),
-                data={
-                    "search": ip_spl,
-                    "exec_mode": "oneshot",
-                    "output_mode": "json",
-                    "earliest_time": "0",
-                    "latest_time": "now",
-                },
-                verify=CONFIG["SPLUNK_VERIFY_SSL"],
-                timeout=30,
-            )
-            if res.status_code == 200:
-                data = res.json().get("results", [])
-
-        if not data:
-            log.info("0 results from Splunk; executing comprehensive JNDI fallbacks")
-            jndi_fallbacks = [
-                'search index=* (source="*pcap*") ip contains "jndi"',
-                'search index=* (source="*pcap*") frame matches "(?i)jndi"',
-                'search index=* (source="*pcap*") (ip contains "jndi" OR http.user_agent contains "jndi")',
-                'search index=* (source="*pcap*") (frame matches "(?i)jndi" OR frame matches "\\$\\{" OR ldap OR tcp.port == 1389 OR tcp.port == 1099)',
-            ]
-            for fb in jndi_fallbacks:
-                res = retry_request(
-                    "POST", url,
-                    auth=(CONFIG["SPLUNK_USER"], CONFIG["SPLUNK_PASS"]),
-                    data={
-                        "search": fb,
-                        "exec_mode": "oneshot",
-                        "output_mode": "json",
-                        "earliest_time": "0",
-                        "latest_time": "now",
-                    },
-                    verify=CONFIG["SPLUNK_VERIFY_SSL"],
-                    timeout=30,
-                )
-                if res.status_code == 200:
-                    data = res.json().get("results", [])
-                if data:
-                    log.info("Fallback query returned %d results: %s", len(data), fb[:80])
-                    break
-
-        if not data:
             telemetry.splunk_results_count = 0
-            return "SPLUNK_WARNING: 0 events found across indexed data."
+            return "SPLUNK_WARNING: 0 events found. Try a broader query."
 
         timestamps = sorted([item.get("_time") for item in data if item.get("_time")])
         if not timestamps:
@@ -798,25 +705,24 @@ def run_agent_1_splunk() -> str:
     ]
 
     try:
-        response = ollama.chat(
-            model=CONFIG["LLM_MODEL"], messages=messages, tools=tools_schema
-        )
-        msg = response["message"]
+        max_rounds = CONFIG["MAX_TOOL_ROUNDS"]
+        for round_idx in range(max_rounds):
+            response = retry_request_ollama(
+                model=CONFIG["LLM_MODEL"], messages=messages, tools=tools_schema
+            )
+            msg = response["message"]
 
-        if msg.get("tool_calls"):
+            if not msg.get("tool_calls"):
+                return msg.get("content", "No Splunk queries were triggered by Agent 1.")
+
             for call in msg["tool_calls"]:
                 args = call["function"]["arguments"]
                 raw_tool_output = tool_query_splunk(**args)
-
                 messages.append(msg)
                 messages.append({"role": "tool", "content": raw_tool_output})
 
-                second_response = retry_request_ollama(
-                    model=CONFIG["LLM_MODEL"], messages=messages
-                )
-                return second_response["message"]["content"]
-
-        return "No Splunk queries were triggered by Agent 1."
+        log.info("Max tool rounds (%d) reached — returning last tool output.", max_rounds)
+        return str(messages[-1]["content"]) if messages else "No results."
     except Exception as e:
         telemetry.errors.append(f"Agent 1 (Splunk) failed: {e}")
         log.error("Agent 1 failed: %s", e)
