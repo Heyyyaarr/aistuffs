@@ -24,6 +24,7 @@ services:
       - SPLUNK_VERIFY_SSL=false
       - OLLAMA_HOST=http://host.docker.internal:11434
       - PCAP_DIRECTORY=/workspace/pcap
+      - AGENTS_DIR=/workspace/agents
     volumes:
       - ./pcap:/workspace/pcap
       - ./output:/workspace/output

@@ -19,19 +19,24 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.handlers.RotatingFileHandler(
-            os.path.join(
-                os.environ.get(
-                    "OUTPUT_DIR",
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "output"),
-                ),
-                "pipeline.log",
-            ),
-            maxBytes=5 * 1024 * 1024,
-            backupCount=3,
-        ),
     ],
 )
+
+_log_dir = os.environ.get(
+    "OUTPUT_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "output"),
+)
+os.makedirs(_log_dir, exist_ok=True)
+_log_path = os.path.join(_log_dir, "pipeline.log")
+try:
+    _file_handler = logging.handlers.RotatingFileHandler(
+        _log_path, maxBytes=5 * 1024 * 1024, backupCount=3,
+    )
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logging.getLogger().addHandler(_file_handler)
+except (OSError, PermissionError):
+    pass
+
 log = logging.getLogger(__name__)
 
 _splunk_pass = os.environ.get("SPLUNK_PASS")
@@ -68,7 +73,10 @@ CONFIG = {
     "MAX_TOOL_ROUNDS": int(os.environ.get("MAX_TOOL_ROUNDS", "3")),
 }
 
-AGENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents")
+AGENTS_DIR = os.environ.get(
+    "AGENTS_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents"),
+)
 
 
 class PipelineTelemetry:

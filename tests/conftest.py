@@ -1,6 +1,7 @@
+import json
 import os
 import sys
-import json
+
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -9,7 +10,6 @@ os.environ["SPLUNK_HOST"] = "https://splunk-test:8089"
 os.environ["PCAP_DIRECTORY"] = "/tmp"
 os.environ["OLLAMA_HOST"] = "http://ollama-test:11434"
 
-import multi_agent as ma
 
 
 def load_fixture(name: str) -> str:
