@@ -521,6 +521,113 @@ def test_pipeline_ollama_configured():
     assert ma.CONFIG["LLM_MODEL"], "LLM_MODEL must be set"
 
 
+# ----- Synthetic PCAP fixture tests -----
+
+def _load_synthetic_json(name: str) -> str:
+    import os
+    path = os.path.join(os.path.dirname(__file__), "fixtures", name)
+    with open(path) as f:
+        return f.read()
+
+
+@patch("multi_agent.subprocess.run")
+def test_synthetic_pcap_jndi_uri(mock_run):
+    fixture = _load_synthetic_json("synthetic_tshark_flagged_output.json")
+    dns_fixture = json.dumps([])
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=fixture, stderr=""),
+        MagicMock(returncode=0, stdout=dns_fixture, stderr=""),
+    ]
+    with patch("os.path.exists", return_value=True):
+        result = tool_analyze_pcap("test.pcap")
+    assert "CRITICAL: Log4j JNDI Exploit String" in result
+    assert "10.0.0.5" in result
+    assert "45.83.65.61" in result
+
+
+@patch("multi_agent.subprocess.run")
+def test_synthetic_pcap_jndi_user_agent(mock_run):
+    fixture = _load_synthetic_json("synthetic_tshark_flagged_output.json")
+    dns_fixture = json.dumps([])
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=fixture, stderr=""),
+        MagicMock(returncode=0, stdout=dns_fixture, stderr=""),
+    ]
+    with patch("os.path.exists", return_value=True):
+        result = tool_analyze_pcap("test.pcap")
+    assert "${jndi:ldap://121.140.99.236" in result or "121.140.99.236" in result
+    assert "198.71.247.91" in result
+
+
+@patch("multi_agent.subprocess.run")
+def test_synthetic_pcap_jndi_authorization(mock_run):
+    fixture = _load_synthetic_json("synthetic_tshark_flagged_output.json")
+    dns_fixture = json.dumps([])
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=fixture, stderr=""),
+        MagicMock(returncode=0, stdout=dns_fixture, stderr=""),
+    ]
+    with patch("os.path.exists", return_value=True):
+        result = tool_analyze_pcap("test.pcap")
+    assert "Auth: Basic" in result
+    assert "curl/7.58.0" in result or "Suspicious UA" in result
+
+
+@patch("multi_agent.subprocess.run")
+def test_synthetic_pcap_obfuscated_jndi(mock_run):
+    fixture = _load_synthetic_json("synthetic_tshark_flagged_output.json")
+    dns_fixture = json.dumps([])
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=fixture, stderr=""),
+        MagicMock(returncode=0, stdout=dns_fixture, stderr=""),
+    ]
+    with patch("os.path.exists", return_value=True):
+        result = tool_analyze_pcap("test.pcap")
+    assert "Obfuscated JNDI Exploit" in result
+    assert "curl/7.68.0" in result
+
+
+@patch("multi_agent.subprocess.run")
+def test_synthetic_pcap_dns_jndi(mock_run):
+    fixture = _load_synthetic_json("synthetic_tshark_flagged_output.json")
+    dns_fixture = json.dumps([])
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=fixture, stderr=""),
+        MagicMock(returncode=0, stdout=dns_fixture, stderr=""),
+    ]
+    with patch("os.path.exists", return_value=True):
+        result = tool_analyze_pcap("test.pcap")
+    assert "jndi:dns" in result or "securityscan" in result
+    assert "CRITICAL: Log4j JNDI Exploit String" in result
+
+
+@patch("multi_agent.subprocess.run")
+def test_synthetic_pcap_known_malicious_ip(mock_run):
+    fixture = _load_synthetic_json("synthetic_tshark_flagged_output.json")
+    dns_fixture = json.dumps([])
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=fixture, stderr=""),
+        MagicMock(returncode=0, stdout=dns_fixture, stderr=""),
+    ]
+    with patch("os.path.exists", return_value=True):
+        result = tool_analyze_pcap("test.pcap")
+    assert "Known Malicious IP" in result
+    assert "198.71.247.91" in result
+
+
+@patch("multi_agent.subprocess.run")
+def test_synthetic_pcap_suspicious_ua(mock_run):
+    fixture = _load_synthetic_json("synthetic_tshark_flagged_output.json")
+    dns_fixture = json.dumps([])
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=fixture, stderr=""),
+        MagicMock(returncode=0, stdout=dns_fixture, stderr=""),
+    ]
+    with patch("os.path.exists", return_value=True):
+        result = tool_analyze_pcap("test.pcap")
+    assert "Suspicious UA" in result or "curl" in result
+
+
 # ----- retry_request -----
 
 @responses.activate

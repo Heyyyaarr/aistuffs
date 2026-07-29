@@ -6,11 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml .
+RUN pip install --no-cache-dir .
 
 COPY multi_agent.py .
 COPY agents/ agents/
 
 ENV PYTHONUNBUFFERED=1
-CMD ["python", "multi_agent.py"]
+CMD ["multi-agent-hunt"]

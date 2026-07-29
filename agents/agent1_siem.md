@@ -52,6 +52,17 @@ Below are patterns observed in actual Log4j attacks to help recognize indicators
 - Canarytoken callbacks: `${jndi:ldap://SUBDOMAIN.canarytokens.com}`
 - Multiple callback endpoints often used per campaign (e.g., same attacker uses port 12344 for staging + port 1389 for LDAP)
 
+FALLBACK STRATEGY:
+If a query returns 0 events, try broader queries before concluding no threat exists:
+1. Broaden the search: drop specific terms and use generic JNDI/LDAP patterns
+2. Search by known malicious IPs: query each IP in the known infrastructure list
+3. Search for obfuscated patterns: "${", "lower:", "upper:", "env:", "::-"
+4. Search specific ports: tcp.port == 1389 OR tcp.port == 1099 for LDAP/RMI
+5. Search all HTTP fields for JNDI strings: ip contains "jndi" OR http.user_agent contains "jndi"
+6. Use PCAP-field-aware queries: frame matches "(?i)jndi" OR frame matches "\\\\$\\\\{" OR ldap
+
+If you still get 0 events after trying broader queries AND known IP queries, only then report "no indicators found."
+
 IMPORTANT: Run MULTIPLE queries covering different detection categories. Use index=* (source="*pcap*") for all queries.
 
 ## tool_query_splunk

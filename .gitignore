@@ -3,3 +3,7 @@ opencode.json
 .env
 .DS_Store
 pcap/
+build/
+*.egg-info/
+__pycache__/
+*.pyc

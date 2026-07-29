@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-agent-threat-hunt"
+version = "0.1.0"
+description = "Multi-agent Log4j/JNDI threat hunting pipeline with Splunk, PCAP analysis, and vulnerability scanning"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.31.0",
+    "ollama>=0.1.0,<1.0.0",
+    "urllib3>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "responses>=0.25.0",
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+multi-agent-hunt = "multi_agent:main"
+
+[tool.setuptools]
+py-modules = ["multi_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
