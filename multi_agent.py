@@ -370,10 +370,8 @@ def summarize_vuln_scan(grype_json: str, syft_json: str) -> str:
 # TOOL DEFINITIONS
 # ==========================================
 
-def tool_query_splunk(**kwargs) -> str:
-    search_query = kwargs.get("search_query") or next(iter(kwargs.values()), None)
-    if not search_query or not isinstance(search_query, str):
-        return f"AGENT_ERROR: invalid arguments — {kwargs}"
+def tool_query_splunk(search_query: str) -> str:
+    log.info("Splunk query: %s", search_query)
     log.info("Splunk query: %s", search_query)
 
     clean_query = search_query.strip()
@@ -788,7 +786,12 @@ class ToolAgent(AgentBase):
                     return msg.get("content", f"No {self.tool_name} calls triggered.")
                 for call in msg["tool_calls"]:
                     args = call["function"]["arguments"]
-                    raw_output = self.tool_fn(**args)
+                    if isinstance(args, dict):
+                        raw_output = self.tool_fn(**args)
+                    elif isinstance(args, str):
+                        raw_output = self.tool_fn(args)
+                    else:
+                        raw_output = self.tool_fn(*args) if isinstance(args, (list, tuple)) else str(args)
                     messages.append(msg)
                     messages.append({"role": "tool", "content": raw_output})
             log.info("Max tool rounds (%d) reached.", max_rounds)
