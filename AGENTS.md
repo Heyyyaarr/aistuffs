@@ -206,11 +206,15 @@ All settings are in the `CONFIG` dict in `multi_agent.py`. Each key can be overr
 | `INVESTIGATOR_NAME` | `INVESTIGATOR_NAME` | `Lead Incident Response Agent` | Name to include in report footer |
 | `SCAN_TARGET` | `SCAN_TARGET` | `""` (disabled) | Directory path or image name for Syft/Grype vulnerability scanning |
 | `PIPELINE` | `PIPELINE` | `Agent 1 (Splunk),Agent 2 (PCAP),Agent 4 (Vulnerability),Agent 3 (Synthesis)` | Comma-separated agent order; agents before Synthesis run in parallel |
+| `AGENTS_DIR` | `AGENTS_DIR` | *(auto: relative to multi_agent.py)* | Path to agents/ directory with prompt markdown files |
+| `OUTPUT_DIR` | `OUTPUT_DIR` | *(auto: relative to multi_agent.py)* | Directory for report output (Markdown + JSON) |
 
 In Docker the following overrides are set automatically via `docker-compose.yml`:
 - `SPLUNK_HOST=https://splunk:8089` (reaches the Splunk container by service name)
 - `OLLAMA_HOST=http://host.docker.internal:11434` (reaches host Ollama from container)
 - `PCAP_DIRECTORY=/workspace/pcap` (matches the mounted volume)
+- `AGENTS_DIR=/workspace/agents` (matches the copied agents directory)
+- `OUTPUT_DIR=/workspace/output` (matches the mounted output volume)
 
 ---
 
