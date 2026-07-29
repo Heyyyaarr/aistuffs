@@ -242,28 +242,52 @@ No structured logging, log levels, or output to files. Debugging pipeline issues
 
 **Fix:** Replace `print()` with the `logging` module. Log to both stdout and a rotating file in `output/`. Include timestamps and log levels.
 
+### 4.8 IP Typo and Missing Attacker IPs (Fixed)
+
+**File:** `multi_agent.py:164-173`, `agents/agent1_siem.md`, `agents/agent2_pcap.md`
+
+The `KNOWN_MALICIOUS_IPS` set had a typo (`191.71.247.91` → correct: `198.71.247.91`) and was missing several attacker IPs identified from the real Splunk PDF data.
+
+**Fix applied:** Corrected IP and added missing addresses (`191.232.38.25`, `107.189.1.178`, `147.182.202.30`). Same fix propagated to agent prompt files.
+
+### 4.9 Agent Prompts Lack Real-World Examples (Fixed)
+
+**Files:** `agents/agent1_siem.md`, `agents/agent2_pcap.md`
+
+Agent prompts contained generic detection categories but no real-world JNDI payload examples to help the LLM recognize actual attack patterns.
+
+**Fix applied:** Added real attack payload examples from PDF data — base64 command structure, LDAP exploit format, canarytoken patterns, obfuscation variants, and non-standard callback ports.
+
+### 4.10 No Realistic Test Fixtures (Fixed)
+
+**Files:** `tests/fixtures/pdf_splunk_results.json`, `tests/fixtures/pdf_pcap_expected.json`, `tests/fixtures/pdf_reference_data.json`, `tests/fixtures/golden_incident_report.md`
+
+Test fixtures used synthetic data that didn't match real-world JNDI attack patterns. This limited the value of tests for catching regressions.
+
+**Fix applied:** Created a complete set of realistic fixtures from the real Splunk hunt PDF (`log4j_regex_search-2026-07-28-1.pdf`) with 36 real log events, expected PCAP analysis output, reference data, and a golden incident report.
+
 ---
 
 ## 5. Testing & Validation
 
-### 5.1 No Tests
+### 5.1 Test Suite Established (47 tests, all passing)
 
-There are zero tests in the repository — no unit tests, integration tests, or end-to-end tests.
+**File:** `tests/test_tools.py` — 47 tests covering all tools and pipeline components.
 
-**Required test coverage:**
-- **Unit:** `tool_query_splunk()` response parsing, `tool_analyze_pcap()` output parsing, `load_section()` regex extraction
-- **Integration:** Splunk API mock with known-good/known-bad responses, TShark mock with sample PCAP data
-- **E2E:** Full pipeline with mock agents, verifying output structure
+Test coverage includes:
+- **Unit:** `tool_query_splunk()` response parsing (4 tests), `tool_analyze_pcap()` output parsing (8 tests), `load_section()` regex extraction (2 tests), `normalize_jndi_payload()` (7 tests including PDF-derived obfuscation cases)
+- **Integration:** Splunk API mock with PDF-derived realistic responses (4 tests), TShark mock with PDF-derived PCAP data (3 tests)
+- **Pipeline Config:** Pipeline configuration validation against PDF reference data (3 tests)
+- **Vulnerability scanning:** Syft/Grype mock tests (5 tests)
+- **Infrastructure:** `retry_request`, `PipelineTelemetry`, IOC enrichment (6 tests)
 
-**Fix:** Add `tests/` directory with `pytest`-based tests. Add `pytest` and `responses` (for HTTP mocking) to `requirements.txt`. Add CI config (GitHub Actions) to run tests on push.
+**Status:** Done. 12 new tests use realistic data from the Splunk PDF to validate the pipeline against real-world attack patterns.
 
-### 5.2 No PCAP Test Fixtures
+### 5.2 PCAP Test Fixtures (Added)
 
-**File:** `pcap/.gitkeep` — directory is empty
+**Files:** `tests/fixtures/pdf_splunk_results.json`, `tests/fixtures/pdf_pcap_expected.json`, `tests/fixtures/pdf_reference_data.json`, `tests/fixtures/golden_incident_report.md`
 
-There are no sample PCAP files for testing. Anyone wanting to test the PCAP analysis must find their own captures.
-
-**Fix:** Create a small synthetic PCAP file with known JNDI exploit payloads using `scapy`. Check it into `tests/fixtures/`. Generate known-good output to compare against.
+**Status:** Done. Realistic fixtures created from the actual Splunk PDF data (36 events, 8 attacker IPs, 5 callback endpoints, full 4-day timeline). Includes a golden incident report for regression testing.
 
 ---
 

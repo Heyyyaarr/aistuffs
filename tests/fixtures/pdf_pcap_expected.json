@@ -1,0 +1,55 @@
+{
+  "pcapA.json": {
+    "total_packets": 36,
+    "jndi_count": 16,
+    "obfuscated_jndi_count": 0,
+    "suspicious_ua_count": 12,
+    "callback_count": 8,
+    "known_malicious_ip_matches": 28,
+    "earliest": "Jul 24, 2026 22:48:40 UTC",
+    "latest": "Jul 28, 2026 17:16:59 UTC",
+    "attackers": [
+      {"src_ip": "195.54.160.149", "count": 8, "payload_type": "base64"},
+      {"src_ip": "175.6.210.66", "count": 8, "payload_type": "jndi_ldap_exploit"}
+    ],
+    "callback_endpoints": ["195.54.160.149:12344", "121.140.99.236:1389"],
+    "protocol_type": "LDAP / LDAPS (RCE Probe)",
+    "protocol_count": 28
+  },
+  "pcapB.json": {
+    "total_packets": 92,
+    "jndi_count": 40,
+    "obfuscated_jndi_count": 0,
+    "suspicious_ua_count": 48,
+    "callback_count": 20,
+    "known_malicious_ip_matches": 92,
+    "earliest": "Jul 24, 2026 22:49:00 UTC",
+    "latest": "Jul 28, 2026 17:17:22 UTC",
+    "attackers": [
+      {"src_ip": "195.54.160.149", "count": 20, "payload_type": "base64"},
+      {"src_ip": "104.248.144.120", "count": 8, "payload_type": "jndi_ldap_exploit"},
+      {"src_ip": "46.105.95.220", "count": 8, "payload_type": "jndi_ldap_exploit"},
+      {"src_ip": "5.157.38.50", "count": 8, "payload_type": "jndi_ldap_exploit"},
+      {"src_ip": "191.232.38.25", "count": 8, "payload_type": "outbound_ldap"},
+      {"src_ip": "107.189.1.178", "count": 4, "payload_type": "outbound_ldap"},
+      {"src_ip": "198.71.247.91", "count": 36, "payload_type": "outbound_ldap"}
+    ],
+    "callback_endpoints": [
+      "195.54.160.149:12344",
+      "31.131.16.127:1389",
+      "5.101.118.127:1389",
+      "71ssmbjqg7ezpoqt8okre7gzu.canarytokens.com"
+    ],
+    "protocol_type": "LDAP / LDAPS (RCE Probe)",
+    "protocol_count": 92
+  },
+  "summary": {
+    "total_protocol_probes": 120,
+    "unique_attacker_ips": 8,
+    "unique_callback_endpoints": 5,
+    "most_active_attacker": "195.54.160.149",
+    "most_active_attacker_count": 56,
+    "most_active_callback": "195.54.160.149:12344",
+    "most_active_callback_count": 56
+  }
+}

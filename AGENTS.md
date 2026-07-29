@@ -2,12 +2,15 @@
 
 ## Architecture
 
-Three-agent pipeline for Log4j/JNDI threat hunting, orchestrated by `multi_agent.py`:
+Four-agent pipeline for Log4j/JNDI threat hunting, orchestrated by `multi_agent.py`:
 
 ```
-Agent 1 (Splunk SIEM) ──┐
-                         ├── Agent 3 (IR Synthesis) ── Final Report
-Agent 2 (PCAP Analyst) ──┘
+Agent 1 (Splunk SIEM) ──────┐
+                             ├── Agent 3 (IR Synthesis) ── Final Report
+Agent 2 (PCAP Analyst) ─────┤
+                             │
+Agent 4 (Vuln Scanner) ─────┘
+(Agents 1, 2, 4 run in parallel)
 ```
 
 | Agent | Role | Tool | Runtime Dependency |
@@ -15,6 +18,7 @@ Agent 2 (PCAP Analyst) ──┘
 | 1 | SIEM & Log Collector | `query_splunk` — SPL queries against Splunk via REST API | Splunk container (port 8089) |
 | 2 | Network & PCAP Analyst | `tool_analyze_pcap` — TShark dissection of PCAP files | TShark on PATH, PCAP files on disk |
 | 3 | Lead IR Reporter | Synthesizes findings into structured report | No external tools (pure LLM) |
+| 4 | Vulnerability Scanner | Syft (SBOM) + Grype (CVE scan) | `syft` and `grype` on PATH, `SCAN_TARGET` configured |
 
 All agents communicate through Ollama (`qwen2.5:14b`) for LLM reasoning.
 
@@ -34,10 +38,17 @@ All agents communicate through Ollama (`qwen2.5:14b`) for LLM reasoning.
 ├── requirements.txt             # Python dependencies
 ├── Dockerfile                   # Container build for hunt service
 ├── docker-compose.yml           # Splunk + hunt services
+├── .dockerignore                # Excludes build context noise
+├── .pre-commit-config.yaml      # Linting/formatting hooks
 ├── agents/                      # AI prompt files loaded at runtime
 │   ├── agent1_siem.md           #   Agent 1 system prompt, tool desc, user message
 │   ├── agent2_pcap.md           #   Agent 2 analysis prompt template
-│   └── agent3_synthesis.md      #   Agent 3 system prompt + user content template
+│   ├── agent3_synthesis.md      #   Agent 3 system prompt + user content template
+│   └── agent4_vuln_scan.md      #   Agent 4 vulnerability scanner prompt
+├── tests/                       # Test suite (pytest)
+│   ├── conftest.py              #   Fixtures and shared setup
+│   ├── test_tools.py            #   Unit tests for all tools
+│   └── fixtures/                #   Test data
 ├── output/                      # Generated incident reports (gitignored)
 │   └── incident_report_*.md     #   Timestamped report output files
 └── pcap/                        # PCAP files mounted into containers
@@ -111,12 +122,19 @@ Checklist tracking all improvement items from `improvements.md`. Organized by pr
    - Flags frames containing JNDI strings (`jndi`, `${`, `ldap`) or outbound LDAP connections (ports 389, 636, 1099, 1389)
    - Injects PCAP data into `{{PCAP_DATA}}` placeholder and sends to LLM
 
-3. **Agent 3 (IR Synthesis)**
+3. **Agent 4 (Vulnerability Scanner)** *(runs in parallel with Agents 1 & 2)*
+   - Runs Syft to generate an SBOM for the configured `SCAN_TARGET`
+   - Runs Grype to scan for known CVEs against the SBOM (or directly on the target)
+   - Summarizes: package count, CVE count, severity breakdown, Log4j-specific CVEs
+   - Results injected into Agent 3 for inclusion in the final report
+
+4. **Agent 3 (IR Synthesis)**
    - Loads `agent3_synthesis.md` (`system_prompt`, `user_content_template`)
-   - Injects Splunk findings into `{{SPLUNK_FINDINGS}}` and PCAP findings into `{{PCAP_FINDINGS}}`
+   - Injects Splunk findings into `{{SPLUNK_FINDINGS}}`, PCAP findings into `{{PCAP_FINDINGS}}`, and vulnerability findings into `{{VULN_FINDINGS}}`
    - LLM produces a structured Playbook Incident Report with:
      - Timeline (earliest to latest)
      - IP categorization (internal RFC1918 vs external attacker infrastructure)
+     - Vulnerability assessment (CVE severity, affected packages, fix versions)
      - Analysis and recommendations
      - TrustedSec Log4j Playbook format
 
@@ -160,17 +178,33 @@ The `hunt` service auto-waits for Splunk to be healthy before starting.
 
 ## Configuration
 
+> **Security note:** `SPLUNK_PASS` is now **required** (no default). For production, use a `.env` file to avoid exposing credentials in process listings or shell history:
+
+> ```bash
+> # .env
+> SPLUNK_PASS=your-production-password
+> ```
+>
+> Then run: `docker compose --env-file .env up -d`
+
 All settings are in the `CONFIG` dict in `multi_agent.py`. Each key can be overridden by setting the corresponding environment variable:
 
 | Config Key | Env Variable | Default | Description |
 |------------|-------------|---------|-------------|
 | `SPLUNK_HOST` | `SPLUNK_HOST` | `https://localhost:8089` | Splunk REST API URL |
 | `SPLUNK_USER` | `SPLUNK_USER` | `admin` | Splunk username |
-| `SPLUNK_PASS` | `SPLUNK_PASS` | `Cybercapstone123!` | Splunk password |
+| `SPLUNK_PASS` | `SPLUNK_PASS` | *(required, no default)* | Splunk password |
+| `SPLUNK_VERIFY_SSL` | `SPLUNK_VERIFY_SSL` | `true` | Verify Splunk TLS certificate |
 | `PCAP_DIRECTORY` | `PCAP_DIRECTORY` | `/Users/josephstafford/Downloads/CodePathProject` | Directory containing PCAP files |
 | `REQUIRED_PCAPS` | `REQUIRED_PCAPS` | `pcapA.pcap,pcapB.pcap` | Comma-separated list of PCAP filenames |
 | `OLLAMA_HOST` | `OLLAMA_HOST` | `http://localhost:11434` | Ollama API endpoint |
 | `LLM_MODEL` | `LLM_MODEL` | `qwen2.5:14b` | Ollama model name |
+| `MAX_LOG_EVENTS` | `MAX_LOG_EVENTS` | `25` | Max Splunk log events to include in report |
+| `MAX_PCAP_PACKETS` | `MAX_PCAP_PACKETS` | `50000` | Max PCAP packets to process |
+| `HTTP_RETRIES` | `HTTP_RETRIES` | `3` | Number of HTTP retry attempts |
+| `HTTP_RETRY_DELAY` | `HTTP_RETRY_DELAY` | `2` | Base retry delay in seconds (exponential backoff) |
+| `INVESTIGATOR_NAME` | `INVESTIGATOR_NAME` | `Lead Incident Response Agent` | Name to include in report footer |
+| `SCAN_TARGET` | `SCAN_TARGET` | `""` (disabled) | Directory path or image name for Syft/Grype vulnerability scanning |
 
 In Docker the following overrides are set automatically via `docker-compose.yml`:
 - `SPLUNK_HOST=https://splunk:8089` (reaches the Splunk container by service name)

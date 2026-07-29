@@ -6,7 +6,7 @@ services:
     environment:
       - SPLUNK_GENERAL_TERMS=--accept-sgt-current-at-splunk-com
       - SPLUNK_START_ARGS=--accept-license
-      - SPLUNK_PASSWORD=${SPLUNK_PASSWORD:-Cybercapstone123!}
+      - SPLUNK_PASSWORD=${SPLUNK_PASSWORD:?SPLUNK_PASSWORD is required}
     ports:
       - "8000:8000"
       - "8089:8089"
@@ -20,6 +20,8 @@ services:
     container_name: multi-agent-hunt
     environment:
       - SPLUNK_HOST=https://splunk:8089
+      - SPLUNK_PASS=${SPLUNK_PASS:?SPLUNK_PASS is required}
+      - SPLUNK_VERIFY_SSL=false
       - OLLAMA_HOST=http://host.docker.internal:11434
       - PCAP_DIRECTORY=/workspace/pcap
     volumes:
