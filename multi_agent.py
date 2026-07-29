@@ -1,15 +1,18 @@
-import os
-import sys
-import re
+from __future__ import annotations
+
+import concurrent.futures
+import datetime
 import json
-import time
 import logging
 import logging.handlers
-import datetime
-import requests
+import os
+import re
 import subprocess
-import concurrent.futures
+import sys
+import time
+
 import ollama
+import requests
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,6 +80,7 @@ class PipelineTelemetry:
         self.vuln_packages_found = 0
         self.vuln_cves_found = 0
         self.errors: list[str] = []
+        self.report_missing_sections: list[str] = []
 
     def summary(self) -> str:
         parts = ["Pipeline Telemetry:"]
@@ -85,6 +89,8 @@ class PipelineTelemetry:
         parts.append(f"  Splunk results: {self.splunk_results_count}")
         parts.append(f"  PCAP packets: {self.pcap_packets_processed} processed, {self.pcap_packets_flagged} flagged")
         parts.append(f"  Vulnerabilities: {self.vuln_packages_found} packages, {self.vuln_cves_found} CVEs")
+        if self.report_missing_sections:
+            parts.append(f"  Report missing sections: {', '.join(self.report_missing_sections)}")
         if self.errors:
             parts.append(f"  Errors ({len(self.errors)}):")
             for e in self.errors:
@@ -93,6 +99,25 @@ class PipelineTelemetry:
 
 
 telemetry = PipelineTelemetry()
+
+REQUIRED_REPORT_SECTIONS = [
+    (r"§\s*1", "§1 — Timeline"),
+    (r"§\s*2", "§2 — Affected Systems"),
+    (r"§\s*3", "§3 — Exploitation Detection — Log Analysis"),
+    (r"§\s*4", "§4 — Exploitation Detection — Network Analysis"),
+    (r"§\s*5", "§5 — Exploitation Detection — Endpoint Analysis"),
+    (r"§\s*6", "§6 — IP Categorization"),
+    (r"§\s*7", "§7 — Preventative Recommendations"),
+    (r"§\s*8", "§8 — Additional Resources"),
+]
+
+
+def validate_report_structure(report: str) -> list[str]:
+    missing = []
+    for pattern, name in REQUIRED_REPORT_SECTIONS:
+        if not re.search(pattern, report):
+            missing.append(name)
+    return missing
 
 
 def load_section(filepath: str, section: str) -> str:
@@ -376,7 +401,10 @@ def tool_query_splunk(search_query: str) -> str:
             return f"SPLUNK_WARNING: {len(data)} events found but none contain _time fields."
 
         telemetry.splunk_results_count = len(data)
-        time_summary = f"TIME RANGE OF LOG ACTIVITY: Earliest = {timestamps[0]} | Latest = {timestamps[-1]} (Total Events: {len(data)})\n\n"
+        time_summary = (
+            f"TIME RANGE OF LOG ACTIVITY: Earliest = {timestamps[0]}"
+            f" | Latest = {timestamps[-1]} (Total Events: {len(data)})\n\n"
+        )
 
         max_events = CONFIG["MAX_LOG_EVENTS"]
         raw_logs = [item.get("_raw", str(item)) for item in data[:max_events]]
@@ -642,7 +670,7 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
         dns_section = ""
         if dns_queries:
             dns_section = (
-                f"\n--- DNS Queries (Playbook §4.3) ---\n"
+                "\n--- DNS Queries (Playbook §4.3) ---\n"
                 + "\n".join(dns_queries[:20])
                 + "\n"
             )
@@ -672,193 +700,243 @@ def tool_analyze_pcap(pcap_filename: str) -> str:
 
 
 # ==========================================
-# AGENT DEFINITIONS
+# AGENT BASE CLASS + REGISTRY
 # ==========================================
 
-def run_agent_1_splunk() -> str:
-    log.info("=== [AGENT 1: SPLUNK LOG COLLECTOR] ===")
+class AgentBase:
+    name: str
+    agent_file: str
 
-    agent1_path = os.path.join(AGENTS_DIR, "agent1_siem.md")
-    system_prompt = load_section(agent1_path, "system_prompt")
-    user_message = load_section(agent1_path, "user_message")
+    def __init__(self) -> None:
+        self.agent_path = os.path.join(AGENTS_DIR, self.agent_file)
 
-    tools_schema = [
-        {
-            "type": "function",
-            "function": {
-                "name": "query_splunk",
-                "description": load_section(agent1_path, "tool_query_splunk").replace(
-                    "Description: ", ""
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {"search_query": {"type": "string"}},
-                    "required": ["search_query"],
-                },
-            },
+    def load_prompt(self, section: str) -> str:
+        return load_section(self.agent_path, section)
+
+    def ollama_chat(self, messages: list[dict], tools: list | None = None) -> dict:
+        kwargs: dict = {"model": CONFIG["LLM_MODEL"], "messages": messages}
+        if tools:
+            kwargs["tools"] = tools
+        return retry_request_ollama(**kwargs)
+
+    def run(self, **kwargs) -> str:
+        raise NotImplementedError
+
+
+class LlmAgent(AgentBase):
+    """Agent that calls Ollama with a single prompt (no tool calling)."""
+
+    def run(self, **kwargs) -> str:
+        log.info("=== [AGENT %s] ===", self.name)
+        try:
+            response = self.ollama_chat(kwargs.get("messages", []))
+            return response["message"]["content"]
+        except Exception as e:
+            telemetry.errors.append(f"Agent {self.name} failed: {e}")
+            log.error("Agent %s failed: %s", self.name, e)
+            return f"AGENT_ERROR: {self.name} unavailable — {e}"
+
+
+class ToolAgent(AgentBase):
+    """Agent that uses function-calling (tools) to interact with tools."""
+
+    tool_name: str = ""
+    tool_fn = None
+    tool_parameters: dict = None
+
+    def _tool_schema(self) -> list[dict]:
+        params = self.tool_parameters or {
+            "type": "object",
+            "properties": {"search_query": {"type": "string"}},
+            "required": ["search_query"],
         }
-    ]
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
-    ]
-
-    try:
-        max_rounds = CONFIG["MAX_TOOL_ROUNDS"]
-        for round_idx in range(max_rounds):
-            response = retry_request_ollama(
-                model=CONFIG["LLM_MODEL"], messages=messages, tools=tools_schema
-            )
-            msg = response["message"]
-
-            if not msg.get("tool_calls"):
-                return msg.get("content", "No Splunk queries were triggered by Agent 1.")
-
-            for call in msg["tool_calls"]:
-                args = call["function"]["arguments"]
-                raw_tool_output = tool_query_splunk(**args)
-                messages.append(msg)
-                messages.append({"role": "tool", "content": raw_tool_output})
-
-        log.info("Max tool rounds (%d) reached — returning last tool output.", max_rounds)
-        return str(messages[-1]["content"]) if messages else "No results."
-    except Exception as e:
-        telemetry.errors.append(f"Agent 1 (Splunk) failed: {e}")
-        log.error("Agent 1 failed: %s", e)
-        return f"AGENT_ERROR: Splunk analysis unavailable — {e}"
-
-
-def run_agent_2_pcap() -> str:
-    log.info("=== [AGENT 2: PCAP DISSECTION ANALYST] ===")
-
-    combined_pcap_data = []
-    for pcap in CONFIG["REQUIRED_PCAPS"]:
-        output = tool_analyze_pcap(pcap)
-        combined_pcap_data.append(output)
-
-    pcap_text = "\n\n".join(combined_pcap_data)
-
-    prompt_template = load_section(
-        os.path.join(AGENTS_DIR, "agent2_pcap.md"), "analysis_prompt"
-    )
-    prompt = prompt_template.replace("{{PCAP_DATA}}", pcap_text)
-
-    try:
-        response = ollama.chat(
-            model=CONFIG["LLM_MODEL"],
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response["message"]["content"]
-    except Exception as e:
-        telemetry.errors.append(f"Agent 2 (PCAP) failed: {e}")
-        log.error("Agent 2 failed: %s", e)
-        return f"AGENT_ERROR: PCAP analysis unavailable — {e}"
-
-
-def run_agent_3_synthesis(splunk_findings: str, pcap_findings: str, vuln_findings: str = "") -> str:
-    log.info("=== [AGENT 3: IR REPORT SYNTHESIZER] ===")
-
-    system_prompt = load_section(
-        os.path.join(AGENTS_DIR, "agent3_synthesis.md"), "system_prompt"
-    )
-    user_content_template = load_section(
-        os.path.join(AGENTS_DIR, "agent3_synthesis.md"), "user_content_template"
-    )
-
-    investigator_name = os.environ.get("INVESTIGATOR_NAME", "Lead Incident Response Agent")
-    current_date = datetime.datetime.now().strftime("%B %d, %Y")
-
-    user_content = (
-        user_content_template.replace("{{SPLUNK_FINDINGS}}", splunk_findings)
-        .replace("{{PCAP_FINDINGS}}", pcap_findings)
-        .replace("{{VULN_FINDINGS}}", vuln_findings)
-    )
-
-    full_prompt = (
-        f"Investigator: {investigator_name}\n"
-        f"Date: {current_date}\n\n"
-        f"{user_content}"
-    )
-
-    try:
-        response = ollama.chat(
-            model=CONFIG["LLM_MODEL"],
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": full_prompt},
-            ],
-        )
-        return response["message"]["content"]
-    except Exception as e:
-        telemetry.errors.append(f"Agent 3 (Synthesis) failed: {e}")
-        log.error("Agent 3 failed: %s", e)
-        return f"AGENT_ERROR: Report synthesis unavailable — {e}"
-
-
-def run_agent_4_vuln_scan() -> str:
-    log.info("=== [AGENT 4: VULNERABILITY SCANNER] ===")
-
-    if not CONFIG["SCAN_TARGET"]:
-        log.warning("No SCAN_TARGET configured — skipping vulnerability scan.")
-        return "VULN_SKIP: No SCAN_TARGET configured (set SCAN_TARGET env var)."
-
-    agent4_path = os.path.join(AGENTS_DIR, "agent4_vuln_scan.md")
-    system_prompt = load_section(agent4_path, "system_prompt")
-
-    try:
-        syft_output = tool_syft_sbom()
-        if syft_output.startswith("VULN_ERROR") or syft_output.startswith("VULN_SKIP"):
-            return syft_output
-
-        grype_output = tool_grype_scan()
-        if grype_output.startswith("VULN_ERROR") or grype_output.startswith("VULN_SKIP"):
-            return grype_output
-
-        summary = summarize_vuln_scan(grype_output, syft_output)
-        log.info("Vulnerability summary generated:\n%s", summary)
-
-        tools_schema = [
+        return [
             {
                 "type": "function",
                 "function": {
-                    "name": "scan_vulnerabilities",
-                    "description": load_section(agent4_path, "tool_scan_vulnerabilities").replace(
-                        "Description: ", ""
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
-                    },
+                    "name": self.tool_name,
+                    "description": self.load_prompt(f"tool_{self.tool_name}").replace("Description: ", ""),
+                    "parameters": params,
                 },
             }
         ]
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": load_section(agent4_path, "user_message")},
-        ]
+    def run(self, **kwargs) -> str:
+        log.info("=== [AGENT %s] ===", self.name)
+        try:
+            tools_schema = self._tool_schema()
+            messages = [
+                {"role": "system", "content": self.load_prompt("system_prompt")},
+                {"role": "user", "content": self.load_prompt("user_message")},
+            ]
+            max_rounds = CONFIG["MAX_TOOL_ROUNDS"]
+            for _ in range(max_rounds):
+                response = self.ollama_chat(messages, tools=tools_schema)
+                msg = response["message"]
+                if not msg.get("tool_calls"):
+                    return msg.get("content", f"No {self.tool_name} calls triggered.")
+                for call in msg["tool_calls"]:
+                    args = call["function"]["arguments"]
+                    raw_output = self.tool_fn(**args)
+                    messages.append(msg)
+                    messages.append({"role": "tool", "content": raw_output})
+            log.info("Max tool rounds (%d) reached.", max_rounds)
+            return str(messages[-1]["content"]) if messages else "No results."
+        except Exception as e:
+            telemetry.errors.append(f"Agent {self.name} failed: {e}")
+            log.error("Agent %s failed: %s", self.name, e)
+            return f"AGENT_ERROR: {self.name} unavailable — {e}"
 
-        response = ollama.chat(
-            model=CONFIG["LLM_MODEL"], messages=messages, tools=tools_schema
+
+# --- Concrete agents ---
+
+class Agent1Splunk(ToolAgent):
+    name = "Agent 1 (Splunk)"
+    agent_file = "agent1_siem.md"
+    tool_name = "query_splunk"
+    tool_fn = tool_query_splunk
+
+
+class Agent2Pcap(LlmAgent):
+    name = "Agent 2 (PCAP)"
+
+    @property
+    def agent_file(self) -> str:
+        return "agent2_pcap.md"
+
+    def run(self, **kwargs) -> str:
+        log.info("=== [AGENT %s] ===", self.name)
+        combined_pcap_data = []
+        for pcap in CONFIG["REQUIRED_PCAPS"]:
+            output = tool_analyze_pcap(pcap)
+            combined_pcap_data.append(output)
+        pcap_text = "\n\n".join(combined_pcap_data)
+        prompt = self.load_prompt("analysis_prompt").replace("{{PCAP_DATA}}", pcap_text)
+        try:
+            response = self.ollama_chat([{"role": "user", "content": prompt}])
+            return response["message"]["content"]
+        except Exception as e:
+            telemetry.errors.append(f"Agent {self.name} failed: {e}")
+            log.error("Agent %s failed: %s", self.name, e)
+            return f"AGENT_ERROR: {self.name} unavailable — {e}"
+
+
+class Agent3Synthesis(AgentBase):
+    name = "Agent 3 (Synthesis)"
+    agent_file = "agent3_synthesis.md"
+
+    def run(self, **kwargs) -> str:
+        log.info("=== [AGENT %s] ===", self.name)
+        splunk_findings = kwargs.get("splunk_findings", "")
+        pcap_findings = kwargs.get("pcap_findings", "")
+        vuln_findings = kwargs.get("vuln_findings", "")
+        investigator_name = os.environ.get("INVESTIGATOR_NAME", "Lead Incident Response Agent")
+        current_date = datetime.datetime.now().strftime("%B %d, %Y")
+        user_content = (
+            self.load_prompt("user_content_template")
+            .replace("{{SPLUNK_FINDINGS}}", splunk_findings)
+            .replace("{{PCAP_FINDINGS}}", pcap_findings)
+            .replace("{{VULN_FINDINGS}}", vuln_findings)
         )
-        msg = response["message"]
+        full_prompt = (
+            f"Investigator: {investigator_name}\n"
+            f"Date: {current_date}\n\n{user_content}"
+        )
+        try:
+            response = self.ollama_chat([
+                {"role": "system", "content": self.load_prompt("system_prompt")},
+                {"role": "user", "content": full_prompt},
+            ])
+            report = response["message"]["content"]
+            missing = validate_report_structure(report)
+            if missing:
+                telemetry.report_missing_sections = missing
+                log.warning("Report missing %d required section(s): %s", len(missing), ", ".join(missing))
+            return report
+        except Exception as e:
+            telemetry.errors.append(f"Agent {self.name} failed: {e}")
+            log.error("Agent %s failed: %s", self.name, e)
+            return f"AGENT_ERROR: {self.name} unavailable — {e}"
 
-        if msg.get("tool_calls"):
-            messages.append(msg)
-            messages.append({"role": "tool", "content": summary})
-            second_response = retry_request_ollama(
-                model=CONFIG["LLM_MODEL"], messages=messages
-            )
-            return second_response["message"]["content"]
 
-        return summary
+class Agent4VulnScan(ToolAgent):
+    name = "Agent 4 (Vulnerability)"
+    agent_file = "agent4_vuln_scan.md"
+    tool_name = "scan_vulnerabilities"
+    tool_parameters = {"type": "object", "properties": {}, "required": []}
 
-    except Exception as e:
-        telemetry.errors.append(f"Agent 4 (Vulnerability scan) failed: {e}")
-        log.error("Agent 4 failed: %s", e)
-        return f"AGENT_ERROR: Vulnerability scan unavailable — {e}"
+    def run(self, **kwargs) -> str:
+        log.info("=== [AGENT %s] ===", self.name)
+        if not CONFIG["SCAN_TARGET"]:
+            log.warning("No SCAN_TARGET configured — skipping vulnerability scan.")
+            return "VULN_SKIP: No SCAN_TARGET configured (set SCAN_TARGET env var)."
+        try:
+            syft_output = tool_syft_sbom()
+            if syft_output.startswith("VULN_ERROR") or syft_output.startswith("VULN_SKIP"):
+                return syft_output
+            grype_output = tool_grype_scan()
+            if grype_output.startswith("VULN_ERROR") or grype_output.startswith("VULN_SKIP"):
+                return grype_output
+            summary = summarize_vuln_scan(grype_output, syft_output)
+            log.info("Vulnerability summary generated:\n%s", summary)
+            messages = [
+                {"role": "system", "content": self.load_prompt("system_prompt")},
+                {"role": "user", "content": self.load_prompt("user_message")},
+            ]
+            tools_schema = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "scan_vulnerabilities",
+                        "description": self.load_prompt("tool_scan_vulnerabilities").replace("Description: ", ""),
+                        "parameters": {"type": "object", "properties": {}, "required": []},
+                    },
+                }
+            ]
+            response = self.ollama_chat(messages, tools=tools_schema)
+            msg = response["message"]
+            if msg.get("tool_calls"):
+                messages.append(msg)
+                messages.append({"role": "tool", "content": summary})
+                second = self.ollama_chat(messages)
+                return second["message"]["content"]
+            return summary
+        except Exception as e:
+            telemetry.errors.append(f"Agent {self.name} failed: {e}")
+            log.error("Agent %s failed: %s", self.name, e)
+            return f"AGENT_ERROR: {self.name} unavailable — {e}"
+
+
+def discover_agents() -> dict[str, AgentBase]:
+    registry: dict[str, AgentBase] = {}
+    for cls in [Agent1Splunk, Agent2Pcap, Agent3Synthesis, Agent4VulnScan]:
+        inst = cls()
+        agent_key = cls.name
+        registry[agent_key] = inst
+    return registry
+
+
+AGENT_REGISTRY = discover_agents()
+DEFAULT_PIPELINE = ["Agent 1 (Splunk)", "Agent 2 (PCAP)", "Agent 4 (Vulnerability)", "Agent 3 (Synthesis)"]
+
+
+# ==========================================
+# OLD AGENT FUNCTIONS (keep for backward compat)
+# ==========================================
+
+def run_agent_1_splunk() -> str:
+    return AGENT_REGISTRY["Agent 1 (Splunk)"].run()
+
+def run_agent_2_pcap() -> str:
+    return AGENT_REGISTRY["Agent 2 (PCAP)"].run()
+
+def run_agent_3_synthesis(splunk_findings: str = "", pcap_findings: str = "", vuln_findings: str = "") -> str:
+    return AGENT_REGISTRY["Agent 3 (Synthesis)"].run(
+        splunk_findings=splunk_findings, pcap_findings=pcap_findings, vuln_findings=vuln_findings
+    )
+
+def run_agent_4_vuln_scan() -> str:
+    return AGENT_REGISTRY["Agent 4 (Vulnerability)"].run()
 
 
 def retry_request_ollama(**kwargs) -> dict:
@@ -884,25 +962,24 @@ def main():
     ollama_host = CONFIG["OLLAMA_HOST"]
     os.environ["OLLAMA_HOST"] = ollama_host
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        future_splunk = executor.submit(run_agent_1_splunk)
-        future_pcap = executor.submit(run_agent_2_pcap)
-        future_vuln = executor.submit(run_agent_4_vuln_scan)
+    pipeline = os.environ.get("PIPELINE", ",".join(DEFAULT_PIPELINE)).split(",")
+    parallel_agents = [name for name in pipeline if name != "Agent 3 (Synthesis)"]
 
-        t0 = time.time()
-        splunk_results = future_splunk.result()
-        telemetry.agent_durations["Agent 1 (Splunk)"] = time.time() - t0
-
-        t0 = time.time()
-        pcap_results = future_pcap.result()
-        telemetry.agent_durations["Agent 2 (PCAP)"] = time.time() - t0
-
-        t0 = time.time()
-        vuln_results = future_vuln.result()
-        telemetry.agent_durations["Agent 4 (Vulnerability)"] = time.time() - t0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel_agents)) as executor:
+        futures = {name: executor.submit(AGENT_REGISTRY[name].run) for name in parallel_agents}
+        results: dict[str, str] = {}
+        for name, future in futures.items():
+            t0 = time.time()
+            results[name] = future.result()
+            telemetry.agent_durations[name] = time.time() - t0
 
     t0 = time.time()
-    final_report = run_agent_3_synthesis(splunk_results, pcap_results, vuln_results)
+    synthesis = AGENT_REGISTRY["Agent 3 (Synthesis)"]
+    final_report = synthesis.run(
+        splunk_findings=results.get("Agent 1 (Splunk)", ""),
+        pcap_findings=results.get("Agent 2 (PCAP)", ""),
+        vuln_findings=results.get("Agent 4 (Vulnerability)", ""),
+    )
     telemetry.agent_durations["Agent 3 (Synthesis)"] = time.time() - t0
 
     log.info("\n" + "=" * 60)
@@ -926,9 +1003,9 @@ def main():
     structured = {
         "timestamp": timestamp,
         "investigator": os.environ.get("INVESTIGATOR_NAME", "Lead Incident Response Agent"),
-        "splunk_findings": splunk_results,
-        "pcap_findings": pcap_results,
-        "vuln_findings": vuln_results,
+        "splunk_findings": results.get("Agent 1 (Splunk)", ""),
+        "pcap_findings": results.get("Agent 2 (PCAP)", ""),
+        "vuln_findings": results.get("Agent 4 (Vulnerability)", ""),
         "report": final_report,
         "telemetry": {
             "agent_durations": telemetry.agent_durations,
@@ -937,6 +1014,7 @@ def main():
             "pcap_packets_flagged": telemetry.pcap_packets_flagged,
             "vuln_packages_found": telemetry.vuln_packages_found,
             "vuln_cves_found": telemetry.vuln_cves_found,
+            "report_missing_sections": telemetry.report_missing_sections,
         },
     }
     with open(json_path, "w") as f:

