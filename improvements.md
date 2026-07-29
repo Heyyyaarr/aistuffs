@@ -397,9 +397,9 @@ No GitHub Actions workflow for:
 | **P2** | Add JSON report output (6.1) | 2 hr | Machine readability | ✅ |
 | **P2** | Add vulnerability scanning agent (3.1c) | 4 hr | CVE detection | ✅ |
 | **P2** | DNS analysis in PCAP tool (3.1d) | 2 hr | Broader detection | ✅ |
-| **P3** | Agent plugin architecture (2.4) | 6 hr | Extensibility | ❌ |
+| **P3** | Agent plugin architecture (2.4) | 6 hr | Extensibility | ✅ |
 | **P3** | Endpoint analysis agent (Sysmon/EDR) | 8 hr | Complete coverage | ❌ |
-| **P3** | CI/CD pipeline (8.3) | 3 hr | Developer workflow | ❌ |
+| **P3** | CI/CD pipeline (8.3) | 3 hr | Developer workflow | ✅ |
 | **P3** | Pre-commit hooks (7.2) | 1 hr | Code quality automation | ✅ |
 | **P3** | .dockerignore (8.2) | 15 min | Build context hygiene | ✅ |
 

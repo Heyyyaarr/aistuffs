@@ -62,8 +62,8 @@ All agents communicate through Ollama (`qwen2.5:14b`) for LLM reasoning.
 ### `multi_agent.py`
 - **Config**: All settings in the `CONFIG` dict (top of file), overridable via environment variables
 - **Tools**: `tool_query_splunk()` (Splunk REST API) and `tool_analyze_pcap()` (TShark wrapper)
-- **Agents**: Three functions (`run_agent_1_splunk`, `run_agent_2_pcap`, `run_agent_3_synthesis`) that load prompts from markdown files and call Ollama
-- **Orchestration**: `main()` runs the pipeline sequentially (Splunk → PCAP → Synthesis), prints results, and writes to `output/`
+- **Agents**: Four classes (`Agent1Splunk`, `Agent2Pcap`, `Agent3Synthesis`, `Agent4VulnScan`) extending `AgentBase` ABC with `LlmAgent` or `ToolAgent` mixins. Auto-discovered via `discover_agents()` registry.
+- **Orchestration**: `main()` reads agent order from `PIPELINE` env var (default `DEFAULT_PIPELINE`), runs parallel agents via `ThreadPoolExecutor`, then sequential synthesis.
 
 ### `agents/agent1_siem.md`
 | Section | Content |
@@ -205,6 +205,7 @@ All settings are in the `CONFIG` dict in `multi_agent.py`. Each key can be overr
 | `HTTP_RETRY_DELAY` | `HTTP_RETRY_DELAY` | `2` | Base retry delay in seconds (exponential backoff) |
 | `INVESTIGATOR_NAME` | `INVESTIGATOR_NAME` | `Lead Incident Response Agent` | Name to include in report footer |
 | `SCAN_TARGET` | `SCAN_TARGET` | `""` (disabled) | Directory path or image name for Syft/Grype vulnerability scanning |
+| `PIPELINE` | `PIPELINE` | `Agent 1 (Splunk),Agent 2 (PCAP),Agent 4 (Vulnerability),Agent 3 (Synthesis)` | Comma-separated agent order; agents before Synthesis run in parallel |
 
 In Docker the following overrides are set automatically via `docker-compose.yml`:
 - `SPLUNK_HOST=https://splunk:8089` (reaches the Splunk container by service name)
@@ -261,25 +262,102 @@ Rules:
 ## Adding a New Agent
 
 1. Create `agents/agentN_name.md` with sections for prompts (use `## section_name` headers)
-2. Call `load_section()` in `multi_agent.py` to load prompts at runtime
-3. Write the agent function (follow pattern of existing agents)
-4. Wire it into the `main()` pipeline
+2. Create a class extending `AgentBase` (use `LlmAgent` for prompt-only or `ToolAgent` for function-calling) in `multi_agent.py`
+3. `discover_agents()` auto-registers it by class name — no manual wiring needed
+4. Add the agent name to `DEFAULT_PIPELINE` or set `PIPELINE` env var
 5. Update this AGENTS.md with the new agent details
 
 Example skeleton:
 
 ```python
-def run_agent_4_<name>() -> str:
-    print("\n=== [AGENT 4: NAME] ===")
-    prompt = load_section(
-        os.path.join(AGENTS_DIR, "agent4_name.md"), "my_prompt"
-    )
-    prompt = prompt.replace("{{PLACEHOLDER}}", dynamic_data)
-    response = ollama.chat(
-        model=CONFIG["LLM_MODEL"],
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response["message"]["content"]
+class Agent5Endpoint(AgentBase):
+    def run(self, **kwargs) -> str:
+        prompt = self.load_prompt("agent5_endpoint.md", "analysis_prompt")
+        prompt = prompt.replace("{{PLACEHOLDER}}", kwargs.get("data", ""))
+        return self.ollama_chat([{"role": "user", "content": prompt}])["message"]["content"]
+```
+
+To register: `AGENT_REGISTRY["Agent 5 (Endpoint)"] = Agent5Endpoint()`
+
+---
+
+## Known Limitations
+
+| Gap | Impact | Future Work |
+|-----|--------|-------------|
+| **No endpoint analysis** | No process, file, or EDR telemetry — misses curl/wget execution, cryptominer processes, unexpected process creation | Add Agent 5 for Sysmon/osquery/EDR API integration |
+| **No IOC feed auto-update** | IOC lists fetched at runtime from static gist URLs — no caching or staleness detection | Add feed freshness check and local cache |
+| **No obfuscation normalization in PCAP** | `normalize_jndi_payload()` handles SPL results but PCAP parser does not normalize before flagging | Apply same normalization in `tool_analyze_pcap()` |
+| **No structured Agent 1/2 output** | Agents 1 and 2 return free text — Agent 3 must re-parse for structure | Enforce JSON mode or structured tool output for all agents |
+| **Single-model dependency** | All agents use `qwen2.5:14b` — no model fallback or per-agent model config | Add per-agent `LLM_MODEL` override in registry |
+| **No report diffing** | Each run overwrites previous output — no comparison between runs | Add versioned report directory with diff summary |
+| **Splunk dependency required** | Pipeline aborts if Splunk is unreachable (even if PCAP-only analysis is desired) | Add skip-Splunk mode or optional agent routing |
+
+## Development Setup
+
+### Prerequisites
+- Python 3.9+
+- [Ollama](https://ollama.ai) with `qwen2.5:14b` pulled: `ollama pull qwen2.5:14b`
+- TShark on PATH: `brew install wireshark` (macOS) or `apt install tshark` (Linux)
+- Syft and Grype on PATH (for Agent 4): `brew install syft grype` or `curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin`
+
+### Quick Start
+
+```bash
+# Clone and install
+git clone <repo>
+cd aistuffs
+pip install -e .          # installs package + multi-agent-hunt CLI
+
+# Set required credentials
+export SPLUNK_PASS=your_password_here
+
+# Run the pipeline
+python multi_agent.py
+# or
+multi-agent-hunt
+```
+
+### Virtual Environment (Recommended)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+## How to Test
+
+Run the test suite with pytest:
+
+```bash
+pip install -e ".[test]"   # install test dependencies
+python -m pytest tests/ -v
+```
+
+The test suite covers:
+
+| Test Area | File | What's Tested |
+|-----------|------|---------------|
+| Splunk tool | `test_tools.py` | Response parsing, error handling, fallback query logic |
+| PCAP tool | `test_tools.py` | TShark JSON parsing, JNDI flagging, DNS extraction, IOC enrichment |
+| Vulnerability scan | `test_tools.py` | Syft/Grype output parsing, severity breakdown, Log4j CVE detection |
+| Report validation | `test_tools.py` | All 8 TrustedSec sections required; missing sections logged in telemetry |
+| Synthetic PCAP fixture | `test_tools.py` | Known JNDI payloads parsed correctly |
+| AgentBase | `test_tools.py` | Registry discovery, backward compat wrappers |
+
+**Total: 58 tests** — run them before any PR.
+
+To run linting:
+
+```bash
+python -m ruff check multi_agent.py tests/
+```
+
+To run type checking:
+
+```bash
+python -m mypy multi_agent.py --ignore-missing-imports
 ```
 
 ---
